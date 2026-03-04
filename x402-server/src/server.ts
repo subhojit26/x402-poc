@@ -16,6 +16,16 @@ import { HTTPFacilitatorClient } from "@x402/core/server";
 const app = express();
 app.use(express.json());
 
+// CORS — allow browser frontends (Vite dev + any deployed origin)
+app.use((_req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, X-PAYMENT, X-PAYMENT-RESPONSE");
+  res.header("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE, X-PAYMENT-REQUIRED");
+  if (_req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,7 +213,8 @@ app.listen(PORT, () => {
   console.log(`\n┌─────────────────────────────────────────────────────┐`);
   console.log(`│            🚀 x402 Payment Server                    │`);
   console.log(`├─────────────────────────────────────────────────────┤`);
-  console.log(`│  URL:       http://localhost:${PORT}${" ".repeat(Math.max(0, 19 - String(PORT).length))}│`);
+  const portStr = String(PORT);
+  console.log(`│  URL:       http://localhost:${portStr}${" ".repeat(Math.max(0, 19 - portStr.length))}│`);
   console.log(`│  Network:   Base Sepolia (testnet)                   │`);
   console.log(`│  Protocol:  x402 (HTTP 402 Payment Required)         │`);
   console.log(`├─────────────────────────────────────────────────────┤`);
