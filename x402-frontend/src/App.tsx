@@ -63,6 +63,36 @@ const ENDPOINTS: Endpoint[] = [
   },
 ];
 
+// ─── Shared public client + balance helper ─────────────────────────────────
+
+const publicClient = createPublicClient({ chain: baseSepolia, transport: http() });
+
+async function fetchUsdcBalance(address: `0x${string}`): Promise<string> {
+  const raw = await publicClient.readContract({
+    address: USDC_ADDRESS,
+    abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
+    functionName: "balanceOf",
+    args: [address],
+  }) as bigint;
+  return formatUnits(raw, 6);
+}
+
+/** Poll until balance differs from `before`, or give up after `attempts` tries. */
+async function pollBalanceChange(
+  address: `0x${string}`,
+  before: string,
+  onUpdate: (b: string) => void,
+  attempts = 8,
+  intervalMs = 1500,
+) {
+  for (let i = 0; i < attempts; i++) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const next = await fetchUsdcBalance(address);
+    onUpdate(next);
+    if (next !== before) return;
+  }
+}
+
 // ─── Wallet hook ────────────────────────────────────────────────────────────
 
 interface WalletState {
@@ -122,18 +152,12 @@ export default function App() {
       }
 
       // Read USDC balance
-      const publicClient = createPublicClient({ chain: baseSepolia, transport: http() });
-      const raw = await publicClient.readContract({
-        address: USDC_ADDRESS,
-        abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-        functionName: "balanceOf",
-        args: [address],
-      }) as bigint;
+      const usdcBalance = await fetchUsdcBalance(address);
 
       setWallet({
         loading: false,
         address,
-        usdcBalance: formatUnits(raw, 6),
+        usdcBalance,
       });
     } catch (err: unknown) {
       const e = err as Error;
@@ -204,15 +228,14 @@ export default function App() {
         [endpoint.id]: { status: "done", data: json.data, txHash, payer, ms },
       }));
 
-      // Refresh USDC balance
-      const publicClient = createPublicClient({ chain: baseSepolia, transport: http() });
-      const raw = await publicClient.readContract({
-        address: USDC_ADDRESS,
-        abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-        functionName: "balanceOf",
-        args: [wallet.address],
-      }) as bigint;
-      setWallet((w) => ({ ...w, usdcBalance: formatUnits(raw, 6) }));
+      // Immediately show an optimistic balance, then poll until chain confirms
+      const before = wallet.usdcBalance ?? "0";
+      fetchUsdcBalance(wallet.address!).then((b) =>
+        setWallet((w) => ({ ...w, usdcBalance: b }))
+      );
+      pollBalanceChange(wallet.address!, before, (b) =>
+        setWallet((w) => ({ ...w, usdcBalance: b }))
+      );
     } catch (err: unknown) {
       const e = err as Error;
       setRequests((r) => ({
