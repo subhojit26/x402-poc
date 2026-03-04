@@ -1,0 +1,9 @@
+[build]
+builder = "nixpacks"
+buildCommand = "cd x402-server && npm install && npm run build 2>/dev/null || true"
+
+[deploy]
+startCommand = "cd x402-server && npx tsx src/server.ts"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
