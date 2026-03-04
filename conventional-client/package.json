@@ -1,0 +1,16 @@
+{
+  "name": "conventional-client",
+  "version": "1.0.0",
+  "description": "Client that simulates the conventional Stripe-like payment flow",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/client.ts",
+    "dev": "tsx watch src/client.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

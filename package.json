@@ -1,0 +1,13 @@
+{
+  "name": "x402-poc",
+  "version": "1.0.0",
+  "description": "x402 vs Conventional Payment Gateway — Proof of Concept",
+  "private": true,
+  "scripts": {
+    "install:all": "cd x402-server && npm install && cd ../x402-client && npm install && cd ../conventional-server && npm install && cd ../conventional-client && npm install",
+    "start:x402-server": "cd x402-server && npm start",
+    "start:x402-client": "cd x402-client && npm start",
+    "start:conventional-server": "cd conventional-server && npm start",
+    "start:conventional-client": "cd conventional-client && npm start"
+  }
+}
