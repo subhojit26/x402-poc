@@ -20,8 +20,8 @@ app.use(express.json());
 app.use((_req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, X-PAYMENT, X-PAYMENT-RESPONSE");
-  res.header("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE, X-PAYMENT-REQUIRED");
+  res.header("Access-Control-Allow-Headers", "Content-Type, X-PAYMENT, X-PAYMENT-RESPONSE, payment-required");
+  res.header("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE, X-PAYMENT-REQUIRED, payment-required, X-PAYMENT-RECEIPT");
   if (_req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
