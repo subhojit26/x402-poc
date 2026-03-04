@@ -7,7 +7,7 @@ export default defineConfig({
     react(),
     nodePolyfills({
       // Buffer is the main one needed by siwe / @x402/evm
-      include: ["buffer", "process", "util", "stream", "events"],
+      include: ["buffer", "crypto", "process", "util", "stream", "events"],
       globals: { Buffer: true, process: true },
     }),
   ],
