@@ -1,8 +1,8 @@
 [build]
-buildCommand = "cd x402-server || exit 1; npm install && npm run build"
+buildCommand = "npm --prefix x402-server install && npm --prefix x402-server run build"
 
 [deploy]
-startCommand = "cd x402-server || exit 1; npm start"
+startCommand = "node x402-server/dist/server.js"
 healthcheckPath = "/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 60
 restartPolicyType = "on_failure"

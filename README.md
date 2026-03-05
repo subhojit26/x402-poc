@@ -249,6 +249,64 @@ CONVENTIONAL PAYMENT SUMMARY
 
 ---
 
+## Deploying the Backend (`x402-server`)
+
+### Option 1 — Railway
+
+A `railway.toml` is provided at the repo root. Connect your GitHub repo in
+[Railway](https://railway.app), create a new service from the repo, and Railway
+will pick up the config automatically.
+
+Key settings (`railway.toml`):
+```toml
+[build]
+buildCommand = "npm --prefix x402-server install && npm --prefix x402-server run build"
+
+[deploy]
+startCommand = "node x402-server/dist/server.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+```
+
+Set the `PAYMENT_RECEIVER` environment variable in the Railway dashboard to
+your wallet address on Base Sepolia.
+
+---
+
+### Option 2 — Render.com
+
+A `render.yaml` blueprint is included at the repo root. To deploy on
+[Render](https://render.com):
+
+1. Push the repo to GitHub.
+2. In Render, go to **New → Blueprint** and connect the repo.
+3. Render will read `render.yaml` and create the `x402-server` web service
+   automatically.
+4. Add `PAYMENT_RECEIVER` as an environment variable in the Render dashboard.
+
+The service starts on Render's auto-assigned `PORT` and serves the
+`/health` health-check endpoint.
+
+---
+
+### Option 3 — Docker (any platform)
+
+A `Dockerfile` lives in `x402-server/`. Build and run it locally or push to
+any container registry / platform (Fly.io, Cloud Run, ECS, etc.):
+
+```bash
+cd x402-server
+docker build -t x402-server .
+docker run -p 4021:4021 \
+  -e PAYMENT_RECEIVER=0xYourWalletAddress \
+  x402-server
+```
+
+The image uses a multi-stage build so only compiled JS and production
+dependencies are included in the final image.
+
+---
+
 ## Resources
 
 - [x402 Website](https://x402.org)
