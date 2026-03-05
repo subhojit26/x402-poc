@@ -43,13 +43,18 @@ const NETWORK = "eip155:84532"; // Base Sepolia (testnet) — change to eip155:8
 // x402 Setup — this is ALL the payment infrastructure you need
 // ─────────────────────────────────────────────────────────────────────────────
 
-const facilitatorClient = new HTTPFacilitatorClient({
-  // Public testnet facilitator hosted by x402.org
-  // For mainnet: "https://api.cdp.coinbase.com/platform/v2/x402"
-  url: "https://x402.org/facilitator",
-});
+const facilitatorClients = [
+  new HTTPFacilitatorClient({
+    // Public testnet facilitator hosted by x402.org
+    url: "https://x402.org/facilitator",
+  }),
+  new HTTPFacilitatorClient({
+    // Fallback facilitator endpoint
+    url: "https://api.cdp.coinbase.com/platform/v2/x402",
+  }),
+];
 
-const resourceServer = new x402ResourceServer(facilitatorClient).register(
+const resourceServer = new x402ResourceServer(facilitatorClients).register(
   NETWORK,
   new ExactEvmScheme()
 );
@@ -58,52 +63,62 @@ const resourceServer = new x402ResourceServer(facilitatorClient).register(
 // Payment Middleware — single call protects ALL configured routes
 // ─────────────────────────────────────────────────────────────────────────────
 
-app.use(
-  paymentMiddleware(
-    {
-      "GET /premium/weather": {
-        accepts: {
-          scheme: "exact",
-          price: "$0.001", // $0.001 USDC per request (~fraction of a cent)
-          network: NETWORK,
-          payTo: PAYMENT_RECEIVER,
-          maxTimeoutSeconds: 60,
-        },
-        description: "Real-time weather data (testnet demo)",
-        mimeType: "application/json",
-      },
-      "GET /premium/news": {
-        accepts: {
-          scheme: "exact",
-          price: "$0.001",
-          network: NETWORK,
-          payTo: PAYMENT_RECEIVER,
-          maxTimeoutSeconds: 60,
-        },
-        description: "Latest news headlines (testnet demo)",
-        mimeType: "application/json",
-      },
-      "GET /premium/stock/:symbol": {
-        accepts: {
-          scheme: "exact",
-          price: "$0.002", // More expensive — more valuable data
-          network: NETWORK,
-          payTo: PAYMENT_RECEIVER,
-          maxTimeoutSeconds: 60,
-        },
-        description: "Stock quote data (testnet demo)",
-        mimeType: "application/json",
-      },
+const premiumRoutes = {
+  "GET /premium/weather": {
+    accepts: {
+      scheme: "exact",
+      price: "$0.001", // $0.001 USDC per request (~fraction of a cent)
+      network: NETWORK,
+      payTo: PAYMENT_RECEIVER,
+      maxTimeoutSeconds: 60,
     },
-    resourceServer
-  )
-);
+    description: "Real-time weather data (testnet demo)",
+    mimeType: "application/json",
+  },
+  "GET /premium/news": {
+    accepts: {
+      scheme: "exact",
+      price: "$0.001",
+      network: NETWORK,
+      payTo: PAYMENT_RECEIVER,
+      maxTimeoutSeconds: 60,
+    },
+    description: "Latest news headlines (testnet demo)",
+    mimeType: "application/json",
+  },
+  "GET /premium/stock/:symbol": {
+    accepts: {
+      scheme: "exact",
+      price: "$0.002", // More expensive — more valuable data
+      network: NETWORK,
+      payTo: PAYMENT_RECEIVER,
+      maxTimeoutSeconds: 60,
+    },
+    description: "Stock quote data (testnet demo)",
+    mimeType: "application/json",
+  },
+} satisfies Parameters<typeof paymentMiddleware>[0];
+
+let premiumRoutesEnabled = true;
+try {
+  await resourceServer.initialize();
+  app.use(paymentMiddleware(premiumRoutes, resourceServer));
+} catch (error) {
+  premiumRoutesEnabled = false;
+  console.error("x402 payment middleware unavailable; premium routes disabled.", error);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protected API Endpoints (only reachable after valid x402 payment)
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.get("/premium/weather", (_req: Request, res: Response) => {
+  if (!premiumRoutesEnabled) {
+    return res.status(503).json({
+      success: false,
+      error: "Premium payment service is temporarily unavailable. Please try again shortly.",
+    });
+  }
   res.json({
     success: true,
     protocol: "x402",
@@ -126,6 +141,12 @@ app.get("/premium/weather", (_req: Request, res: Response) => {
 });
 
 app.get("/premium/news", (_req: Request, res: Response) => {
+  if (!premiumRoutesEnabled) {
+    return res.status(503).json({
+      success: false,
+      error: "Premium payment service is temporarily unavailable. Please try again shortly.",
+    });
+  }
   res.json({
     success: true,
     protocol: "x402",
@@ -153,6 +174,12 @@ app.get("/premium/news", (_req: Request, res: Response) => {
 });
 
 app.get("/premium/stock/:symbol", (req: Request, res: Response) => {
+  if (!premiumRoutesEnabled) {
+    return res.status(503).json({
+      success: false,
+      error: "Premium payment service is temporarily unavailable. Please try again shortly.",
+    });
+  }
   const { symbol } = req.params;
   res.json({
     success: true,
@@ -180,6 +207,7 @@ app.get("/health", (_req: Request, res: Response) => {
     port: PORT,
     network: NETWORK,
     facilitator: "https://x402.org/facilitator",
+    premiumRoutesEnabled,
     payTo: PAYMENT_RECEIVER,
     routes: {
       "GET /premium/weather": "$0.001 USDC",
