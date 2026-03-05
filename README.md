@@ -247,6 +247,14 @@ CONVENTIONAL PAYMENT SUMMARY
 | Facilitator | https://x402.org/facilitator |
 | Mainnet facilitator | https://api.cdp.coinbase.com/platform/v2/x402 |
 
+> **Note:** This demo uses **testnet USDC** on **Base Sepolia**. These are **real blockchain transactions** 
+> executed by the facilitator service on the testnet. However, testnet tokens have no monetary value — 
+> they are free from faucets and are used only for testing purposes.
+>
+> **Balance Updates:** After making a payment, your balance is updated from the blockchain. This may take 
+> 5-30 seconds depending on block confirmation times. The UI shows "(updating...)" while polling for 
+> the new balance. You can also click the 🔄 button to manually refresh your balance.
+
 ---
 
 ## Resources
