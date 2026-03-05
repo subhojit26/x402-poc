@@ -13,5 +13,17 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
+    proxy: {
+      // Forward API calls to the x402 server during local development.
+      // Set VITE_SERVER_URL in .env.local to override for a remote server.
+      "/premium": {
+        target: "http://localhost:4021",
+        changeOrigin: true,
+      },
+      "/health": {
+        target: "http://localhost:4021",
+        changeOrigin: true,
+      },
+    },
   },
 });
