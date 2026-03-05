@@ -108,23 +108,29 @@ async function fetchUsdcBalance(address: `0x${string}`): Promise<string> {
 
 /**
  * Poll until balance differs from `before`, or give up after `maxAttempts` tries.
- * Total polling duration: up to ~15 seconds (initial 500ms + up to 14 x 1000ms)
+ * Total polling duration: up to ~30 seconds (increased for testnet delays)
+ * Returns true if balance changed, false if timeout
  */
 async function pollBalanceChange(
   address: `0x${string}`,
   before: string,
   onUpdate: (b: string) => void,
-  maxAttempts = 15,
+  maxAttempts = 30,
   intervalMs = 1000,
-) {
+): Promise<boolean> {
   for (let i = 0; i < maxAttempts; i++) {
     // First check is faster (500ms), subsequent checks wait full interval
     const delay = i === 0 ? 500 : intervalMs;
     await new Promise((r) => setTimeout(r, delay));
-    const next = await fetchUsdcBalance(address);
-    onUpdate(next);
-    if (next !== before) return;
+    try {
+      const next = await fetchUsdcBalance(address);
+      onUpdate(next);
+      if (next !== before) return true;
+    } catch {
+      // Continue polling even if one fetch fails
+    }
   }
+  return false;
 }
 
 // ─── Wallet hook ────────────────────────────────────────────────────────────
@@ -134,6 +140,7 @@ interface WalletState {
   usdcBalance?: string;
   loading: boolean;
   error?: string;
+  balanceUpdating?: boolean; // True when polling for balance update
 }
 
 // ─── App ────────────────────────────────────────────────────────────────────
@@ -198,6 +205,19 @@ export default function App() {
       setWallet({ loading: false, error: e.message });
     }
   }, []);
+
+  // ── Refresh Balance ────────────────────────────────────────────────────────
+  const refreshBalance = useCallback(async () => {
+    if (!wallet.address) return;
+    
+    setWallet((w) => ({ ...w, balanceUpdating: true }));
+    try {
+      const newBalance = await fetchUsdcBalance(wallet.address);
+      setWallet((w) => ({ ...w, usdcBalance: newBalance, balanceUpdating: false }));
+    } catch {
+      setWallet((w) => ({ ...w, balanceUpdating: false }));
+    }
+  }, [wallet.address]);
 
   // ── Pay & Fetch ────────────────────────────────────────────────────────────
   const payAndFetch = useCallback(async (endpoint: Endpoint) => {
@@ -273,9 +293,23 @@ export default function App() {
       
       // If balance hasn't changed yet (blockchain confirmation pending), poll for changes
       if (newBalance === balanceBeforePayment) {
-        pollBalanceChange(currentAddress, balanceBeforePayment, (b) =>
+        // Mark that we're waiting for balance update
+        setWallet((w) => ({ ...w, balanceUpdating: true }));
+        
+        const balanceChanged = await pollBalanceChange(currentAddress, balanceBeforePayment, (b) =>
           setWallet((w) => ({ ...w, usdcBalance: b }))
         );
+        
+        // Mark polling complete
+        setWallet((w) => ({ ...w, balanceUpdating: false }));
+        
+        // If balance still hasn't changed after extended polling, log it
+        if (!balanceChanged) {
+          console.log(
+            "[x402] Balance polling timed out. Transaction may still be processing on-chain. " +
+            "Refresh the page or check the transaction on BaseScan to verify."
+          );
+        }
       }
     } catch (err: unknown) {
       const e = err as Error;
@@ -317,7 +351,22 @@ export default function App() {
                   {wallet.address!.slice(0, 6)}…{wallet.address!.slice(-4)}
                 </span>
               </div>
-              <span style={styles.balance}>💰 {Number(wallet.usdcBalance).toFixed(4)} USDC</span>
+              <div style={styles.balanceRow}>
+                <span style={styles.balance}>
+                  💰 {Number(wallet.usdcBalance).toFixed(4)} USDC
+                  {wallet.balanceUpdating && (
+                    <span style={styles.balanceUpdating}> (updating...)</span>
+                  )}
+                </span>
+                <button 
+                  style={styles.refreshBtn}
+                  onClick={refreshBalance}
+                  disabled={wallet.balanceUpdating}
+                  title="Refresh balance from blockchain"
+                >
+                  🔄
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -328,7 +377,11 @@ export default function App() {
       <main style={styles.main}>
         {!isConnected && (
           <div style={styles.callout}>
-            Connect your MetaMask wallet (on Base Sepolia) with testnet USDC to try live x402 payments.
+            <strong>🧪 Testnet Demo:</strong> This uses Base Sepolia testnet with free testnet USDC.
+            <br />
+            Transactions are <strong>real blockchain transactions</strong>, but on a test network (no real money).
+            <br />
+            Connect your MetaMask wallet to try live x402 payments.
             <br />
             <a
               href="https://portal.cdp.coinbase.com/products/faucet"
@@ -434,7 +487,7 @@ function EndpointCard({
         <div style={styles.resultBox}>
           {req.txHash && (
             <div style={styles.receipt}>
-              <span style={styles.receiptLabel}>🧾 Transaction</span>
+              <span style={styles.receiptLabel}>🧾 Testnet TX</span>
               <a
                 href={`https://sepolia.basescan.org/tx/${req.txHash}`}
                 target="_blank"
@@ -445,6 +498,11 @@ function EndpointCard({
               </a>
               <span style={styles.receiptMs}>{req.ms}ms</span>
             </div>
+          )}
+          {req.txHash && (
+            <p style={styles.testnetNote}>
+              ✅ Real transaction on Base Sepolia testnet. Balance updates after blockchain confirmation (~5-30s).
+            </p>
           )}
           <pre style={styles.pre}>{JSON.stringify(req.data, null, 2)}</pre>
         </div>
@@ -511,7 +569,23 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 0 6px #22c55e",
   },
   walletAddr: { fontSize: 14, fontWeight: 600, fontFamily: "monospace" },
+  balanceRow: { display: "flex", alignItems: "center", gap: 6 },
   balance: { fontSize: 12, color: "#94a3b8" },
+  balanceUpdating: { 
+    fontSize: 11, 
+    color: "#fbbf24", 
+    fontStyle: "italic",
+    animation: "pulse 1.5s ease-in-out infinite",
+  },
+  refreshBtn: {
+    background: "transparent",
+    border: "none",
+    cursor: "pointer",
+    fontSize: 12,
+    padding: 2,
+    opacity: 0.7,
+    transition: "opacity 0.2s",
+  },
   errorBanner: {
     marginTop: 10,
     color: "#fca5a5",
@@ -632,6 +706,15 @@ const styles: Record<string, React.CSSProperties> = {
     borderBottom: "1px dashed #38bdf8",
   },
   receiptMs: { marginLeft: "auto", color: "#64748b", fontSize: 11 },
+  testnetNote: {
+    fontSize: 11,
+    color: "#86efac",
+    margin: "8px 0",
+    padding: "6px 10px",
+    background: "rgba(34,197,94,0.08)",
+    borderRadius: 6,
+    lineHeight: 1.4,
+  },
   pre: {
     background: "rgba(0,0,0,0.35)",
     borderRadius: 8,
