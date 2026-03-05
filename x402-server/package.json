@@ -4,7 +4,8 @@
   "description": "Express server using x402 payment protocol middleware",
   "type": "module",
   "scripts": {
-    "start": "tsx src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts"
   },
   "dependencies": {
