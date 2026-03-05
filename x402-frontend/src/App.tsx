@@ -115,6 +115,9 @@ function createFreshPublicClient(rpcUrl?: string) {
       batch: false, // Disable batching to ensure immediate fresh reads
       retryCount: 2,
       timeout: 10_000,
+      fetchOptions: {
+        cache: "no-store", // Bypass browser HTTP cache for fresh on-chain data
+      },
     }),
     batch: {
       multicall: false, // Disable multicall batching
@@ -210,6 +213,55 @@ async function pollBalanceChange(
   
   console.log(`[x402] Balance polling completed after ${maxAttempts} attempts without detecting change`);
   return false;
+}
+
+/**
+ * Wait for a transaction to be confirmed on-chain, then refresh the balance.
+ * This is more reliable than balance polling because it uses the actual txHash
+ * to wait for blockchain confirmation, avoiding RPC caching issues.
+ * Falls back to balance polling if txHash is unavailable or receipt wait fails.
+ */
+async function waitForTxAndRefreshBalance(
+  address: `0x${string}`,
+  balanceBefore: string,
+  txHash: string | undefined,
+  onUpdate: (b: string) => void,
+): Promise<boolean> {
+  if (txHash) {
+    try {
+      console.log(`[x402] Waiting for transaction confirmation: ${txHash}`);
+      const client = createFreshPublicClient();
+      await client.waitForTransactionReceipt({
+        hash: txHash as `0x${string}`,
+        confirmations: 1,
+        timeout: 60_000, // 60 second timeout
+      });
+      console.log(`[x402] Transaction confirmed on-chain: ${txHash}`);
+
+      // Transaction confirmed — fetch updated balance
+      const newBalance = await fetchUsdcBalance(address, true);
+      onUpdate(newBalance);
+
+      if (newBalance !== balanceBefore) {
+        console.log(`[x402] Balance updated after tx confirmation! New: ${newBalance} USDC`);
+        return true;
+      }
+
+      // Balance still same right after confirmation; give RPC a moment to catch up
+      await new Promise((r) => setTimeout(r, 2000));
+      const retryBalance = await fetchUsdcBalance(address, true);
+      onUpdate(retryBalance);
+      if (retryBalance !== balanceBefore) {
+        console.log(`[x402] Balance updated after short delay! New: ${retryBalance} USDC`);
+        return true;
+      }
+    } catch (err) {
+      console.warn("[x402] waitForTransactionReceipt failed, falling back to balance polling:", err);
+    }
+  }
+
+  // Fallback: poll balance directly (used when txHash is unavailable or receipt wait fails)
+  return pollBalanceChange(address, balanceBefore, onUpdate);
 }
 
 // ─── Wallet hook ────────────────────────────────────────────────────────────
@@ -373,22 +425,26 @@ export default function App() {
       const newBalance = await fetchUsdcBalance(currentAddress, true);
       setWallet((w) => ({ ...w, usdcBalance: newBalance }));
       
-      // If balance hasn't changed yet (blockchain confirmation pending), poll for changes
+      // If balance hasn't changed yet (blockchain confirmation pending), wait for tx confirmation
       if (newBalance === balanceBeforePayment) {
         // Mark that we're waiting for balance update
         setWallet((w) => ({ ...w, balanceUpdating: true }));
         
-        const balanceChanged = await pollBalanceChange(currentAddress, balanceBeforePayment, (b) =>
-          setWallet((w) => ({ ...w, usdcBalance: b }))
+        // Use transaction receipt waiting (more reliable) with balance polling as fallback
+        const balanceChanged = await waitForTxAndRefreshBalance(
+          currentAddress,
+          balanceBeforePayment,
+          txHash,
+          (b) => setWallet((w) => ({ ...w, usdcBalance: b })),
         );
         
         // Mark polling complete
         setWallet((w) => ({ ...w, balanceUpdating: false }));
         
-        // If balance still hasn't changed after extended polling, log it
+        // If balance still hasn't changed after waiting, log it
         if (!balanceChanged) {
           console.log(
-            "[x402] Balance polling timed out. Transaction may still be processing on-chain. " +
+            "[x402] Balance update timed out. Transaction may still be processing on-chain. " +
             "Refresh the page or check the transaction on BaseScan to verify."
           );
         }
