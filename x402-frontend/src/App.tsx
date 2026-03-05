@@ -92,44 +92,123 @@ const ENDPOINTS: Endpoint[] = [
   },
 ];
 
-// ─── Shared public client + balance helper ─────────────────────────────────
+// ─── RPC Configuration for reliable balance fetching ────────────────────────
+// Multiple RPC endpoints for redundancy - try them in order if one fails
+const RPC_ENDPOINTS = [
+  "https://sepolia.base.org",
+  "https://base-sepolia-rpc.publicnode.com",
+  "https://base-sepolia.blockpi.network/v1/rpc/public",
+];
 
+// Keep track of which RPC endpoint is working best
+let currentRpcIndex = 0;
+
+/**
+ * Create a fresh public client for each balance fetch to avoid stale cache.
+ * Using `batch: false` and no caching ensures we always get fresh on-chain data.
+ */
+function createFreshPublicClient(rpcUrl?: string) {
+  const url = rpcUrl || RPC_ENDPOINTS[currentRpcIndex];
+  return createPublicClient({
+    chain: baseSepolia,
+    transport: http(url, {
+      batch: false, // Disable batching to ensure immediate fresh reads
+      retryCount: 2,
+      timeout: 10_000,
+    }),
+    batch: {
+      multicall: false, // Disable multicall batching
+    },
+    cacheTime: 0, // Disable response caching
+  });
+}
+
+// Shared client for initial reads (cached is fine for non-critical reads)
 const publicClient = createPublicClient({ chain: baseSepolia, transport: http() });
 
-async function fetchUsdcBalance(address: `0x${string}`): Promise<string> {
-  const raw = await publicClient.readContract({
-    address: USDC_ADDRESS,
-    abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-    functionName: "balanceOf",
-    args: [address],
-  }) as bigint;
-  return formatUnits(raw, 6);
+/**
+ * Fetch USDC balance with retry across multiple RPC endpoints.
+ * Creates a fresh client for each read to avoid cached/stale data.
+ * @param address - Wallet address to check
+ * @param forceRefresh - If true, creates a fresh client to bypass any caching
+ */
+async function fetchUsdcBalance(address: `0x${string}`, forceRefresh = false): Promise<string> {
+  const client = forceRefresh ? createFreshPublicClient() : publicClient;
+  
+  // Try current RPC, then fallback to others if it fails
+  const maxRetries = RPC_ENDPOINTS.length;
+  let lastError: Error | undefined;
+  
+  for (let retry = 0; retry < maxRetries; retry++) {
+    try {
+      const rpcUrl = RPC_ENDPOINTS[(currentRpcIndex + retry) % RPC_ENDPOINTS.length];
+      const retryClient = forceRefresh || retry > 0 ? createFreshPublicClient(rpcUrl) : client;
+      
+      const raw = await retryClient.readContract({
+        address: USDC_ADDRESS,
+        abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
+        functionName: "balanceOf",
+        args: [address],
+        blockTag: "latest", // Explicitly request latest block
+      }) as bigint;
+      
+      // If we had to use a fallback RPC, remember it for future calls
+      if (retry > 0) {
+        currentRpcIndex = (currentRpcIndex + retry) % RPC_ENDPOINTS.length;
+        console.log(`[x402] Switched to RPC endpoint: ${RPC_ENDPOINTS[currentRpcIndex]}`);
+      }
+      
+      return formatUnits(raw, 6);
+    } catch (err) {
+      lastError = err as Error;
+      console.warn(`[x402] RPC ${RPC_ENDPOINTS[(currentRpcIndex + retry) % RPC_ENDPOINTS.length]} failed, trying next...`);
+    }
+  }
+  
+  throw lastError || new Error("All RPC endpoints failed");
 }
 
 /**
  * Poll until balance differs from `before`, or give up after `maxAttempts` tries.
- * Total polling duration: up to ~30 seconds (increased for testnet delays)
+ * Total polling duration: up to ~60 seconds (increased for testnet delays)
+ * Uses fresh RPC reads on each poll to ensure we see on-chain updates.
  * Returns true if balance changed, false if timeout
  */
 async function pollBalanceChange(
   address: `0x${string}`,
   before: string,
   onUpdate: (b: string) => void,
-  maxAttempts = 30,
+  maxAttempts = 60,  // Increased from 30 to 60 for testnet delays
   intervalMs = 1000,
 ): Promise<boolean> {
+  console.log(`[x402] Starting balance polling. Before: ${before} USDC`);
+  
   for (let i = 0; i < maxAttempts; i++) {
     // First check is faster (500ms), subsequent checks wait full interval
     const delay = i === 0 ? 500 : intervalMs;
     await new Promise((r) => setTimeout(r, delay));
+    
     try {
-      const next = await fetchUsdcBalance(address);
+      // Always force refresh to get latest on-chain data
+      const next = await fetchUsdcBalance(address, true);
       onUpdate(next);
-      if (next !== before) return true;
-    } catch {
+      
+      if (next !== before) {
+        console.log(`[x402] Balance updated! New: ${next} USDC (took ${i + 1} attempts)`);
+        return true;
+      }
+      
+      // Log progress every 10 attempts
+      if ((i + 1) % 10 === 0) {
+        console.log(`[x402] Still polling for balance change... (${i + 1}/${maxAttempts} attempts)`);
+      }
+    } catch (err) {
+      console.warn(`[x402] Balance fetch failed on attempt ${i + 1}:`, err);
       // Continue polling even if one fetch fails
     }
   }
+  
+  console.log(`[x402] Balance polling completed after ${maxAttempts} attempts without detecting change`);
   return false;
 }
 
@@ -212,7 +291,8 @@ export default function App() {
     
     setWallet((w) => ({ ...w, balanceUpdating: true }));
     try {
-      const newBalance = await fetchUsdcBalance(wallet.address);
+      // Force refresh to get latest on-chain data
+      const newBalance = await fetchUsdcBalance(wallet.address, true);
       setWallet((w) => ({ ...w, usdcBalance: newBalance, balanceUpdating: false }));
     } catch {
       setWallet((w) => ({ ...w, balanceUpdating: false }));
@@ -227,8 +307,9 @@ export default function App() {
     if (!eth) return;
 
     // Fetch current balance before payment to detect changes later
+    // Force refresh to get accurate baseline
     const currentAddress = wallet.address;
-    const balanceBeforePayment = await fetchUsdcBalance(currentAddress);
+    const balanceBeforePayment = await fetchUsdcBalance(currentAddress, true);
 
     setRequests((r) => ({ ...r, [endpoint.id]: { status: "signing", data: null } }));
 
@@ -288,7 +369,8 @@ export default function App() {
 
       // Update balance immediately and poll for changes
       // The payment has been sent, so the balance should reduce once confirmed on-chain
-      const newBalance = await fetchUsdcBalance(currentAddress);
+      // Force refresh to get latest on-chain data after payment
+      const newBalance = await fetchUsdcBalance(currentAddress, true);
       setWallet((w) => ({ ...w, usdcBalance: newBalance }));
       
       // If balance hasn't changed yet (blockchain confirmation pending), poll for changes
