@@ -72,6 +72,24 @@ const ENDPOINTS: Endpoint[] = [
     price: "$0.002 USDC",
     description: "Live stock price for Apple (AAPL)",
   },
+  {
+    id: "music",
+    method: "GET",
+    path: "/premium/music",
+    label: "Buy Music",
+    icon: "🎵",
+    price: "$0.003 USDC",
+    description: "Premium music track purchase",
+  },
+  {
+    id: "video",
+    method: "GET",
+    path: "/premium/video",
+    label: "Buy Video",
+    icon: "🎬",
+    price: "$0.005 USDC",
+    description: "Premium video content purchase",
+  },
 ];
 
 // ─── Shared public client + balance helper ─────────────────────────────────
@@ -88,16 +106,21 @@ async function fetchUsdcBalance(address: `0x${string}`): Promise<string> {
   return formatUnits(raw, 6);
 }
 
-/** Poll until balance differs from `before`, or give up after `attempts` tries. */
+/**
+ * Poll until balance differs from `before`, or give up after `maxAttempts` tries.
+ * Total polling duration: up to ~15 seconds (initial 500ms + up to 14 x 1000ms)
+ */
 async function pollBalanceChange(
   address: `0x${string}`,
   before: string,
   onUpdate: (b: string) => void,
-  attempts = 8,
-  intervalMs = 1500,
+  maxAttempts = 15,
+  intervalMs = 1000,
 ) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
+  for (let i = 0; i < maxAttempts; i++) {
+    // First check is faster (500ms), subsequent checks wait full interval
+    const delay = i === 0 ? 500 : intervalMs;
+    await new Promise((r) => setTimeout(r, delay));
     const next = await fetchUsdcBalance(address);
     onUpdate(next);
     if (next !== before) return;
@@ -183,6 +206,10 @@ export default function App() {
     const eth = (window as unknown as { ethereum?: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown>}; }).ethereum;
     if (!eth) return;
 
+    // Fetch current balance before payment to detect changes later
+    const currentAddress = wallet.address;
+    const balanceBeforePayment = await fetchUsdcBalance(currentAddress);
+
     setRequests((r) => ({ ...r, [endpoint.id]: { status: "signing", data: null } }));
 
     try {
@@ -239,14 +266,17 @@ export default function App() {
         [endpoint.id]: { status: "done", data: json.data, txHash, payer, ms },
       }));
 
-      // Immediately show an optimistic balance, then poll until chain confirms
-      const before = wallet.usdcBalance ?? "0";
-      fetchUsdcBalance(wallet.address!).then((b) =>
-        setWallet((w) => ({ ...w, usdcBalance: b }))
-      );
-      pollBalanceChange(wallet.address!, before, (b) =>
-        setWallet((w) => ({ ...w, usdcBalance: b }))
-      );
+      // Update balance immediately and poll for changes
+      // The payment has been sent, so the balance should reduce once confirmed on-chain
+      const newBalance = await fetchUsdcBalance(currentAddress);
+      setWallet((w) => ({ ...w, usdcBalance: newBalance }));
+      
+      // If balance hasn't changed yet (blockchain confirmation pending), poll for changes
+      if (newBalance === balanceBeforePayment) {
+        pollBalanceChange(currentAddress, balanceBeforePayment, (b) =>
+          setWallet((w) => ({ ...w, usdcBalance: b }))
+        );
+      }
     } catch (err: unknown) {
       const e = err as Error;
       setRequests((r) => ({

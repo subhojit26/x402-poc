@@ -109,6 +109,28 @@ const premiumRoutes = {
     description: "Stock quote data (testnet demo)",
     mimeType: "application/json",
   },
+  "GET /premium/music": {
+    accepts: {
+      scheme: "exact",
+      price: "$0.003", // Music content - higher value
+      network: NETWORK,
+      payTo: PAYMENT_RECEIVER,
+      maxTimeoutSeconds: 60,
+    },
+    description: "Premium music track purchase (testnet demo)",
+    mimeType: "application/json",
+  },
+  "GET /premium/video": {
+    accepts: {
+      scheme: "exact",
+      price: "$0.005", // Video content - highest value
+      network: NETWORK,
+      payTo: PAYMENT_RECEIVER,
+      maxTimeoutSeconds: 60,
+    },
+    description: "Premium video content purchase (testnet demo)",
+    mimeType: "application/json",
+  },
 } satisfies Parameters<typeof paymentMiddleware>[0];
 
 let paymentMiddlewareInitialized = false;
@@ -210,6 +232,48 @@ app.get("/premium/stock/:symbol", (req: Request, res: Response) => {
   });
 });
 
+app.get("/premium/music", (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    protocol: "x402",
+    data: {
+      title: "Summer Vibes",
+      artist: "Digital Dreams",
+      album: "Crypto Beats Vol. 1",
+      duration: "3:45",
+      genre: "Electronic",
+      quality: "320kbps",
+      downloadUrl: "https://example.com/music/summer-vibes.mp3",
+      license: "Personal use only",
+      timestamp: new Date().toISOString(),
+    },
+  });
+});
+
+app.get("/premium/video", (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    protocol: "x402",
+    data: {
+      title: "Introduction to Web3 Payments",
+      creator: "Blockchain Academy",
+      duration: "12:30",
+      resolution: "1080p",
+      format: "MP4",
+      description: "Learn how x402 protocol enables seamless pay-per-request APIs",
+      streamUrl: "https://example.com/video/web3-payments-intro.mp4",
+      chapters: [
+        { time: "0:00", title: "Introduction" },
+        { time: "2:15", title: "x402 Protocol Overview" },
+        { time: "5:30", title: "Setting Up Payment Middleware" },
+        { time: "9:00", title: "Client Integration" },
+      ],
+      license: "Educational use",
+      timestamp: new Date().toISOString(),
+    },
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Free Endpoints
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,6 +291,8 @@ app.get("/health", (_req: Request, res: Response) => {
       "GET /premium/weather": "$0.001 USDC",
       "GET /premium/news": "$0.001 USDC",
       "GET /premium/stock/:symbol": "$0.002 USDC",
+      "GET /premium/music": "$0.003 USDC",
+      "GET /premium/video": "$0.005 USDC",
     },
   });
 });
@@ -241,6 +307,8 @@ app.get("/", (_req: Request, res: Response) => {
       "GET /premium/weather": "$0.001 USDC per request",
       "GET /premium/news": "$0.001 USDC per request",
       "GET /premium/stock/:symbol": "$0.002 USDC per request",
+      "GET /premium/music": "$0.003 USDC per request",
+      "GET /premium/video": "$0.005 USDC per request",
     },
     howToPayNatively: "Send HTTP request → get 402 → client auto-pays → retry with PAYMENT-SIGNATURE header",
     testnet: true,
@@ -267,5 +335,7 @@ app.listen(PORT, () => {
   console.log(`│    GET /premium/weather         → $0.001 USDC        │`);
   console.log(`│    GET /premium/news            → $0.001 USDC        │`);
   console.log(`│    GET /premium/stock/:symbol   → $0.002 USDC        │`);
+  console.log(`│    GET /premium/music           → $0.003 USDC        │`);
+  console.log(`│    GET /premium/video           → $0.005 USDC        │`);
   console.log(`└─────────────────────────────────────────────────────┘\n`);
 });
