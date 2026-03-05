@@ -1,0 +1,8 @@
+[build]
+buildCommand = "cd x402-server || exit 1; npm install && npm run build"
+
+[deploy]
+startCommand = "cd x402-server || exit 1; npm start"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"

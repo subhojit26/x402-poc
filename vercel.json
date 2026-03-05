@@ -2,5 +2,10 @@
   "buildCommand": "cd x402-frontend && npm install && npm run build",
   "outputDirectory": "x402-frontend/dist",
   "framework": "vite",
-  "rewrites": [{ "source": "/(.*)", "destination": "/" }]
+  "rewrites": [{ "source": "/(.*)", "destination": "/" }],
+  "build": {
+    "env": {
+      "VITE_SERVER_URL": "@vite_server_url"
+    }
+  }
 }
