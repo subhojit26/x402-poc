@@ -17,12 +17,22 @@ const app = express();
 app.use(express.json());
 
 // CORS — allow browser frontends (Vite dev + any deployed origin)
-app.use((_req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "*");
-  res.header("Access-Control-Expose-Headers", "*");
-  if (_req.method === "OPTIONS") return res.sendStatus(204);
+// Set ALLOWED_ORIGINS env var to comma-separated list of allowed origins in production
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
+  : ["http://localhost:5173", "http://localhost:3000", "https://x402-poc-henna.vercel.app"];
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  // Only set CORS headers when there's a browser origin header
+  // Non-browser (server-to-server) requests don't need CORS headers
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Payment, X-PAYMENT");
+    res.header("Access-Control-Expose-Headers", "X-Payment, X-PAYMENT, X-PAYMENT-RESPONSE, WWW-Authenticate");
+  }
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
