@@ -5,7 +5,7 @@
   "rewrites": [{ "source": "/(.*)", "destination": "/" }],
   "build": {
     "env": {
-      "VITE_SERVER_URL": "https://ample-grace.railway.app"
+      "VITE_SERVER_URL": "https://x402-poc-production-ad71.up.railway.app"
     }
   }
 }
