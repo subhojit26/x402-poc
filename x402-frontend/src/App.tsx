@@ -3,6 +3,7 @@ import { createWalletClient, custom, createPublicClient, http, formatUnits } fro
 import { baseSepolia } from "viem/chains";
 import { x402Client } from "@x402/core/client";
 import { ExactEvmScheme } from "@x402/evm/exact/client";
+import { toClientEvmSigner } from "@x402/evm";
 import { wrapFetchWithPayment } from "@x402/fetch";
 
 // ─── Config ────────────────────────────────────────────────────────────────
@@ -371,16 +372,28 @@ export default function App() {
         transport: custom(eth),
       });
 
-      // Build a signer that x402 ExactEvmScheme can use
-      const signer = {
-        address: wallet.address,
-        signTypedData: (params: Parameters<typeof walletClient.signTypedData>[0]) =>
-          walletClient.signTypedData({ ...params, account: wallet.address! }),
-      };
+      // Build a signer that x402 ExactEvmScheme can use.
+      // toClientEvmSigner composes signTypedData (from wallet) with readContract
+      // (from publicClient) which is required for Permit2 allowance checks.
+      const signer = toClientEvmSigner(
+        {
+          address: wallet.address,
+          signTypedData: (msg: {
+            domain: Record<string, unknown>;
+            types: Record<string, unknown>;
+            primaryType: string;
+            message: Record<string, unknown>;
+          }) =>
+            walletClient.signTypedData({
+              ...msg,
+              account: wallet.address!,
+            } as Parameters<typeof walletClient.signTypedData>[0]),
+        },
+        createFreshPublicClient(),
+      );
 
       const client = new x402Client();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      client.register("eip155:*", new ExactEvmScheme(signer as any));
+      client.register("eip155:*", new ExactEvmScheme(signer));
 
       const fetchWithPayment = wrapFetchWithPayment(fetch, client);
 
