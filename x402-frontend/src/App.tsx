@@ -7,7 +7,18 @@ import { wrapFetchWithPayment } from "@x402/fetch";
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? "http://localhost:4021";
+// In production set VITE_SERVER_URL in your Vercel environment variables to
+// the deployed Railway server URL (e.g. https://your-server.up.railway.app).
+// Locally the Vite dev-server proxy forwards /premium and /health to port 4021.
+const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? "";
+
+if (import.meta.env.PROD && !import.meta.env.VITE_SERVER_URL) {
+  console.warn(
+    "[x402] VITE_SERVER_URL is not configured. " +
+    "Set it in your Vercel environment variables to the Railway server URL " +
+    "and redeploy, otherwise API requests will fail."
+  );
+}
 const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
 
 // ─── Types ──────────────────────────────────────────────────────────────────

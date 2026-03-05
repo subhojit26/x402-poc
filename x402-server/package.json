@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "prestart": "node -e \"if (!require('fs').existsSync('dist/server.js')) { console.error('\\n\\u274c dist/server.js not found. Run: npm run build\\n'); process.exit(1); }\"",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts"
   },
