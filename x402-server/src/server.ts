@@ -17,10 +17,20 @@ const app = express();
 app.use(express.json());
 
 // CORS — allow browser frontends (Vite dev + any deployed origin)
-// Set ALLOWED_ORIGINS env var to comma-separated list of allowed origins in production
-const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
-  : ["http://localhost:5173", "http://localhost:3000", "https://x402-poc-henna.vercel.app"];
+// These origins are ALWAYS allowed (cannot be overridden by env var)
+const REQUIRED_ORIGINS = [
+  "http://localhost:5173",
+  "http://localhost:3000", 
+  "https://x402-poc-henna.vercel.app",
+];
+
+// Additional origins from env var (comma-separated)
+const envOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
+  : [];
+
+// Merge required + env origins (deduplicated)
+const ALLOWED_ORIGINS = [...new Set([...REQUIRED_ORIGINS, ...envOrigins])];
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
