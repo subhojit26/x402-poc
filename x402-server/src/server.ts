@@ -24,17 +24,14 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  // Allow requests from allowed origins or when no origin (non-browser requests)
+  // Only set CORS headers when there's a browser origin header
+  // Non-browser (server-to-server) requests don't need CORS headers
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.header("Access-Control-Allow-Origin", origin);
-  } else if (!origin) {
-    // Allow server-to-server requests (no origin header)
-    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Payment, X-PAYMENT");
+    res.header("Access-Control-Expose-Headers", "X-Payment, X-PAYMENT, X-PAYMENT-RESPONSE, WWW-Authenticate");
   }
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Payment, X-PAYMENT");
-  res.header("Access-Control-Expose-Headers", "X-Payment, X-PAYMENT, X-PAYMENT-RESPONSE, WWW-Authenticate");
-  res.header("Access-Control-Allow-Credentials", "true");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
