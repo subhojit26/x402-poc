@@ -5,7 +5,7 @@
   "rewrites": [{ "source": "/(.*)", "destination": "/" }],
   "build": {
     "env": {
-      "VITE_SERVER_URL": "http://ample-grace.railway.app"
+      "VITE_SERVER_URL": "https://ample-grace.railway.app"
     }
   }
 }
