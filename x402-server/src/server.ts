@@ -8,7 +8,7 @@
  * The magic:  Adding paymentMiddleware() is the ONLY change needed to monetize an API.
  */
 
-import express, { type Request, type Response } from "express";
+import express, { type Request, type Response, type RequestHandler } from "express";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
@@ -103,28 +103,32 @@ const premiumRoutes = {
 } satisfies Parameters<typeof paymentMiddleware>[0];
 
 let paymentMiddlewareInitialized = false;
-try {
-  await resourceServer.initialize();
-  paymentMiddlewareInitialized = true;
-  app.use(paymentMiddleware(premiumRoutes, resourceServer));
-} catch (error) {
-  console.error(
-    "x402 payment middleware unavailable; premium routes disabled. Check facilitator reachability and outbound network access.",
-    {
-      facilitators: FACILITATOR_URLS,
-      error,
-    }
-  );
-}
+let premiumPaymentMiddleware: RequestHandler | undefined;
 
-app.use("/premium", (_req, res, next) => {
-  if (!paymentMiddlewareInitialized) {
+void (async () => {
+  try {
+    await resourceServer.initialize();
+    premiumPaymentMiddleware = paymentMiddleware(premiumRoutes, resourceServer);
+    paymentMiddlewareInitialized = true;
+  } catch (error) {
+    console.error(
+      "x402 payment middleware unavailable; premium routes disabled. Check facilitator reachability and outbound network access.",
+      {
+        facilitators: FACILITATOR_URLS,
+        error,
+      }
+    );
+  }
+})();
+
+app.use("/premium", (req, res, next) => {
+  if (!paymentMiddlewareInitialized || !premiumPaymentMiddleware) {
     return res.status(503).json({
       success: false,
       error: "Premium payment service is temporarily unavailable. Please try again shortly.",
     });
   }
-  next();
+  return premiumPaymentMiddleware(req, res, next);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
