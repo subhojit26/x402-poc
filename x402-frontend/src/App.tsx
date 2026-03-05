@@ -106,22 +106,21 @@ async function fetchUsdcBalance(address: `0x${string}`): Promise<string> {
   return formatUnits(raw, 6);
 }
 
-/** Poll until balance differs from `before`, or give up after `attempts` tries. */
+/**
+ * Poll until balance differs from `before`, or give up after `maxAttempts` tries.
+ * Total polling duration: up to ~15 seconds (initial 500ms + up to 14 x 1000ms)
+ */
 async function pollBalanceChange(
   address: `0x${string}`,
   before: string,
   onUpdate: (b: string) => void,
-  attempts = 15,
+  maxAttempts = 15,
   intervalMs = 1000,
 ) {
-  // First immediate check after short delay
-  await new Promise((r) => setTimeout(r, 500));
-  const firstCheck = await fetchUsdcBalance(address);
-  onUpdate(firstCheck);
-  if (firstCheck !== before) return;
-
-  for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
+  for (let i = 0; i < maxAttempts; i++) {
+    // First check is faster (500ms), subsequent checks wait full interval
+    const delay = i === 0 ? 500 : intervalMs;
+    await new Promise((r) => setTimeout(r, delay));
     const next = await fetchUsdcBalance(address);
     onUpdate(next);
     if (next !== before) return;
@@ -207,8 +206,9 @@ export default function App() {
     const eth = (window as unknown as { ethereum?: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown>}; }).ethereum;
     if (!eth) return;
 
-    // Capture balance before payment to detect changes later
-    const balanceBeforePayment = wallet.usdcBalance ?? "0";
+    // Fetch current balance before payment to detect changes later
+    const currentAddress = wallet.address;
+    const balanceBeforePayment = await fetchUsdcBalance(currentAddress);
 
     setRequests((r) => ({ ...r, [endpoint.id]: { status: "signing", data: null } }));
 
@@ -268,9 +268,6 @@ export default function App() {
 
       // Update balance immediately and poll for changes
       // The payment has been sent, so the balance should reduce once confirmed on-chain
-      const currentAddress = wallet.address!;
-      
-      // First immediate update
       const newBalance = await fetchUsdcBalance(currentAddress);
       setWallet((w) => ({ ...w, usdcBalance: newBalance }));
       
@@ -287,7 +284,7 @@ export default function App() {
         [endpoint.id]: { status: "error", data: null, error: e.message },
       }));
     }
-  }, [wallet.address, wallet.usdcBalance]);
+  }, [wallet.address]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
   const isConnected = !!wallet.address;
