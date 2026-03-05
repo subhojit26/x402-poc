@@ -21,8 +21,16 @@ app.use((req, res, next) => {
   // Allow all origins
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Payment, X-PAYMENT");
-  res.header("Access-Control-Expose-Headers", "X-Payment, X-PAYMENT, X-PAYMENT-RESPONSE, WWW-Authenticate");
+  // Include all x402 protocol headers: X-Payment, PAYMENT-SIGNATURE, and sign-in-with-x
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Payment, X-PAYMENT, PAYMENT-SIGNATURE, payment-signature, sign-in-with-x"
+  );
+  // Expose all x402 response headers to the client
+  res.header(
+    "Access-Control-Expose-Headers",
+    "X-Payment, X-PAYMENT, X-PAYMENT-RESPONSE, PAYMENT-REQUIRED, PAYMENT-RESPONSE, WWW-Authenticate"
+  );
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
