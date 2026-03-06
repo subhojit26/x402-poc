@@ -8,7 +8,7 @@
     "prestart": "node -e \"if (!require('fs').existsSync('dist/server.js')) { console.error('\\n\\u274c dist/server.js not found. Run: npm run build\\n'); process.exit(1); }\"",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
-    "test": "node --import tsx/esm --test src/server.test.ts"
+    "test": "node --env-file-if-exists=.env --import tsx/esm --test src/server.test.ts"
   },
   "dependencies": {
     "@x402/core": "^2.5.0",
