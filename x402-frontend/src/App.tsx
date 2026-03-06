@@ -98,7 +98,6 @@ const ENDPOINTS: Endpoint[] = [
 const RPC_ENDPOINTS = [
   "https://sepolia.base.org",
   "https://base-sepolia-rpc.publicnode.com",
-  "https://base-sepolia.blockpi.network/v1/rpc/public",
 ];
 
 // Keep track of which RPC endpoint is working best
