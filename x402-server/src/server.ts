@@ -165,8 +165,8 @@ void (async () => {
 // NOTE: Mounted at root (not at "/premium") so req.path retains its full value.
 // If mounted at "/premium", Express strips that prefix from req.path, which
 // would cause the x402 middleware's route matching to fail.
-app.use((_req, res, next) => {
-  if (!_req.path.startsWith("/premium")) return next();
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/premium")) return next();
 
   const originalEnd = res.end.bind(res) as typeof res.end;
   let injected = false;
