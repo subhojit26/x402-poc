@@ -183,7 +183,11 @@ async function fetchUsdcBalance(address: `0x${string}`, forceRefresh = false): P
  * This avoids false-negatives when formatting differs (e.g. "1.993" vs "1.993000").
  */
 function balanceChanged(a: string, b: string): boolean {
-  const diff = Math.abs(parseFloat(a) - parseFloat(b));
+  const parsedA = parseFloat(a);
+  const parsedB = parseFloat(b);
+  // If either value is NaN (invalid input), treat as unchanged to avoid false positives
+  if (isNaN(parsedA) || isNaN(parsedB)) return false;
+  const diff = Math.abs(parsedA - parsedB);
   // Treat any difference > 0.0000001 (well below 1 USDC decimal) as a change
   return diff > 1e-7;
 }
