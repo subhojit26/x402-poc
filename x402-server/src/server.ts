@@ -21,10 +21,11 @@ app.use((req, res, next) => {
   // Allow all origins
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  // Include all x402 protocol headers: X-Payment, PAYMENT-SIGNATURE, and sign-in-with-x
+  // Include all x402 protocol headers: X-Payment, PAYMENT-SIGNATURE, sign-in-with-x,
+  // and Access-Control-Expose-Headers (sent as a request header by @x402/fetch)
   res.header(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Payment, X-PAYMENT, PAYMENT-SIGNATURE, payment-signature, sign-in-with-x"
+    "Content-Type, Authorization, X-Payment, X-PAYMENT, PAYMENT-SIGNATURE, payment-signature, sign-in-with-x, Access-Control-Expose-Headers"
   );
   // Expose all x402 response headers to the client
   res.header(
@@ -151,6 +152,46 @@ void (async () => {
     );
   }
 })();
+
+// Settlement receipt injection middleware.
+// The x402 payment middleware sets a PAYMENT-RESPONSE header with the settlement
+// receipt (txHash, payer, etc.). However, cross-origin requests through proxies
+// and CDNs (Vercel, Railway) may strip custom response headers even when
+// Access-Control-Expose-Headers is configured. As a robust fallback, this
+// middleware intercepts res.end() *before* the x402 middleware wraps it. When
+// x402 replays the buffered response after settlement, our wrapper injects the
+// settlement receipt into the JSON body so the client can always access it.
+app.use("/premium", (_req, res, next) => {
+  const originalEnd = res.end.bind(res) as typeof res.end;
+
+  (res as { end: typeof res.end }).end = function (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...endArgs: any[]
+  ) {
+    const paymentHeader =
+      res.getHeader("PAYMENT-RESPONSE") ??
+      res.getHeader("X-PAYMENT-RESPONSE");
+
+    const chunk = endArgs[0] as unknown;
+    if (paymentHeader && res.statusCode < 400 && chunk) {
+      try {
+        const bodyStr =
+          typeof chunk === "string" ? chunk : (chunk as Buffer).toString();
+        const json = JSON.parse(bodyStr) as Record<string, unknown>;
+        json._paymentReceipt = String(paymentHeader);
+        const newBody = JSON.stringify(json);
+        res.setHeader("Content-Length", Buffer.byteLength(newBody));
+        endArgs[0] = newBody;
+      } catch {
+        // Not valid JSON — send as-is
+      }
+    }
+
+    return originalEnd(...endArgs);
+  } as typeof res.end;
+
+  next();
+});
 
 app.use("/premium", (req, res, next) => {
   if (!paymentMiddlewareInitialized || !premiumPaymentMiddleware) {

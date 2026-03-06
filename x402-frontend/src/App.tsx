@@ -252,7 +252,10 @@ async function pollBalanceChange(
  * Wait for a transaction to be confirmed on-chain, then refresh the balance.
  * This is more reliable than balance polling because it uses the actual txHash
  * to wait for blockchain confirmation, avoiding RPC caching issues.
- * Falls back to balance polling if txHash is unavailable or receipt wait fails.
+ *
+ * When txHash IS available: wait for on-chain receipt, then refresh balance.
+ * When txHash is NOT available: watch for USDC Transfer events from this address,
+ * with balance polling as a fallback.
  */
 async function waitForTxAndRefreshBalance(
   address: `0x${string}`,
@@ -333,10 +336,66 @@ async function waitForTxAndRefreshBalance(
       console.warn("[x402] ⚠️ waitForTransactionReceipt failed, falling back to balance polling:", (err as Error).message);
     }
   } else {
-    console.log("[x402] ⚠️ No txHash available — cannot wait for transaction receipt. Falling back to balance polling.");
+    console.log("[x402] ⚠️ No txHash available — watching for USDC Transfer events as primary strategy.");
+
+    // Watch for USDC Transfer events from this address (more reliable than balance polling)
+    try {
+      const client = createFreshPublicClient();
+      const transferDetected = await Promise.race([
+        // Strategy 1: Watch for Transfer events from our address
+        new Promise<boolean>((resolve) => {
+          const unwatch = client.watchContractEvent({
+            address: USDC_ADDRESS,
+            abi: [{
+              type: "event",
+              name: "Transfer",
+              inputs: [
+                { type: "address", indexed: true, name: "from" },
+                { type: "address", indexed: true, name: "to" },
+                { type: "uint256", indexed: false, name: "value" },
+              ],
+            }],
+            eventName: "Transfer",
+            args: { from: address },
+            onLogs: (logs) => {
+              if (logs.length > 0) {
+                console.log(`[x402] 🔔 Transfer event detected! ${logs.length} transfer(s) from ${address}`);
+                unwatch();
+                resolve(true);
+              }
+            },
+          });
+          // Clean up watcher after timeout
+          setTimeout(() => { unwatch(); resolve(false); }, 30_000);
+        }),
+        // Strategy 2: Concurrent balance polling (shorter duration)
+        pollBalanceChange(address, balanceBefore, onUpdate, 30, 1000),
+      ]);
+
+      if (transferDetected) {
+        // Transfer event detected — refresh balance
+        await new Promise((r) => setTimeout(r, 1000)); // Small delay for RPC to catch up
+        const freshClient = createFreshPublicClient();
+        const raw = await freshClient.readContract({
+          address: USDC_ADDRESS,
+          abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
+          functionName: "balanceOf",
+          args: [address],
+          blockTag: "latest",
+        }) as bigint;
+        const newBalance = formatUnits(raw, 6);
+        onUpdate(newBalance);
+        console.log(`[x402] Balance after transfer event: ${newBalance} USDC (before: ${balanceBefore})`);
+        return balanceChanged(newBalance, balanceBefore) || true; // Transfer event = payment happened
+      }
+      
+      return false;
+    } catch (err) {
+      console.warn("[x402] Event watching failed, falling back to balance polling:", (err as Error).message);
+    }
   }
 
-  // Fallback: poll balance directly (used when txHash is unavailable or receipt wait fails)
+  // Fallback: poll balance directly (used when event watching fails or receipt wait fails)
   return pollBalanceChange(address, balanceBefore, onUpdate);
 }
 
@@ -486,12 +545,18 @@ export default function App() {
         return;
       }
 
-      const json = (await response.json()) as { data: unknown };
+      const json = (await response.json()) as { data: unknown; _paymentReceipt?: string };
 
       // Payment receipt from response header
       // The x402 middleware sets the header as "PAYMENT-RESPONSE" (primary)
       // Also check "X-PAYMENT-RESPONSE" as a fallback for compatibility
-      const receiptHeader = response.headers.get("PAYMENT-RESPONSE") || response.headers.get("X-PAYMENT-RESPONSE");
+      // Finally, check the response body for _paymentReceipt (server-side fallback
+      // for when proxies/CDNs strip custom response headers)
+      const receiptHeader =
+        response.headers.get("PAYMENT-RESPONSE") ||
+        response.headers.get("X-PAYMENT-RESPONSE") ||
+        json._paymentReceipt ||
+        undefined;
       let txHash: string | undefined;
       let payer: string | undefined;
       
@@ -531,7 +596,7 @@ export default function App() {
           }
         }
       } else {
-        console.warn("[x402] ⚠️ No PAYMENT-RESPONSE or X-PAYMENT-RESPONSE header found in response!");
+        console.warn("[x402] ⚠️ No payment receipt found in response header or body");
         console.warn("[x402]   Available headers:", [...response.headers.keys()].join(", "));
       }
 
