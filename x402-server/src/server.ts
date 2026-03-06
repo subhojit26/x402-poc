@@ -99,7 +99,7 @@ const premiumRoutes = {
     description: "Latest news headlines (testnet demo)",
     mimeType: "application/json",
   },
-  "GET /premium/stock/:symbol": {
+  "GET /premium/stock/[symbol]": {
     accepts: {
       scheme: "exact",
       price: "$0.002", // More expensive — more valuable data
@@ -161,7 +161,13 @@ void (async () => {
 // middleware intercepts res.end() *before* the x402 middleware wraps it. When
 // x402 replays the buffered response after settlement, our wrapper injects the
 // settlement receipt into the JSON body so the client can always access it.
-app.use("/premium", (_req, res, next) => {
+//
+// NOTE: Mounted at root (not at "/premium") so req.path retains its full value.
+// If mounted at "/premium", Express strips that prefix from req.path, which
+// would cause the x402 middleware's route matching to fail.
+app.use((_req, res, next) => {
+  if (!_req.path.startsWith("/premium")) return next();
+
   const originalEnd = res.end.bind(res) as typeof res.end;
   let injected = false;
 
@@ -195,7 +201,8 @@ app.use("/premium", (_req, res, next) => {
   next();
 });
 
-app.use("/premium", (req, res, next) => {
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/premium")) return next();
   if (!paymentMiddlewareInitialized || !premiumPaymentMiddleware) {
     return res.status(503).json({
       success: false,

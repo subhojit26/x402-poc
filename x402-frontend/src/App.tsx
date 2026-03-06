@@ -112,69 +112,76 @@ function createFreshPublicClient(rpcUrl?: string) {
   return createPublicClient({
     chain: baseSepolia,
     transport: http(url, {
-      batch: false, // Disable batching to ensure immediate fresh reads
+      batch: false,
       retryCount: 2,
       timeout: 10_000,
       fetchOptions: {
-        cache: "no-store", // Bypass browser HTTP cache for fresh on-chain data
+        cache: "no-store",
       },
     }),
     batch: {
-      multicall: false, // Disable multicall batching
+      multicall: false,
     },
-    cacheTime: 0, // Disable response caching
+    cacheTime: 0,
   });
 }
 
-// Shared client for initial reads (cached is fine for non-critical reads)
-const publicClient = createPublicClient({ chain: baseSepolia, transport: http() });
-
 /**
- * Fetch USDC balance with retry across multiple RPC endpoints.
- * Creates a fresh client for each read to avoid cached/stale data.
- * @param address - Wallet address to check
- * @param forceRefresh - If true, creates a fresh client to bypass any caching
+ * Fetch USDC balance using a direct JSON-RPC `eth_call` via `fetch`.
+ *
+ * This completely bypasses viem's transport and caching layers to ensure
+ * we always read the latest on-chain state. Each call includes a cache-bust
+ * query parameter and the `cache: "no-store"` fetch option so neither the
+ * browser nor any intermediate CDN can serve a stale response.
+ *
+ * Falls back across multiple RPC endpoints when one is unreachable.
  */
-async function fetchUsdcBalance(address: `0x${string}`, forceRefresh = false): Promise<string> {
-  const client = forceRefresh ? createFreshPublicClient() : publicClient;
-  
-  // Try current RPC, then fallback to others if it fails
-  const maxRetries = RPC_ENDPOINTS.length;
+async function fetchUsdcBalance(address: `0x${string}`): Promise<string> {
+  // balanceOf(address) selector = keccak256("balanceOf(address)")[0:4]
+  const selector = "0x70a08231";
+  const paddedAddress = address.slice(2).toLowerCase().padStart(64, "0");
+  const callData = `${selector}${paddedAddress}`;
+
   let lastError: Error | undefined;
-  
-  console.log(`[x402] fetchUsdcBalance called for ${address.slice(0, 8)}… forceRefresh=${forceRefresh} currentRpcIndex=${currentRpcIndex}`);
-  
-  for (let retry = 0; retry < maxRetries; retry++) {
+
+  for (let i = 0; i < RPC_ENDPOINTS.length; i++) {
+    const rpcUrl = RPC_ENDPOINTS[(currentRpcIndex + i) % RPC_ENDPOINTS.length];
     try {
-      const rpcUrl = RPC_ENDPOINTS[(currentRpcIndex + retry) % RPC_ENDPOINTS.length];
-      const retryClient = forceRefresh || retry > 0 ? createFreshPublicClient(rpcUrl) : client;
-      
-      console.log(`[x402] Querying balance via RPC: ${rpcUrl} (attempt ${retry + 1}/${maxRetries})`);
-      
-      const raw = await retryClient.readContract({
-        address: USDC_ADDRESS,
-        abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-        functionName: "balanceOf",
-        args: [address],
-        blockTag: "latest", // Explicitly request latest block
-      }) as bigint;
-      
-      // If we had to use a fallback RPC, remember it for future calls
-      if (retry > 0) {
-        currentRpcIndex = (currentRpcIndex + retry) % RPC_ENDPOINTS.length;
-        console.log(`[x402] Switched to RPC endpoint: ${RPC_ENDPOINTS[currentRpcIndex]}`);
-      }
-      
+      // Append a cache-bust parameter so proxies / CDNs never serve stale data
+      const url = `${rpcUrl}?_cb=${Date.now()}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: Date.now(),
+          method: "eth_call",
+          params: [{ to: USDC_ADDRESS, data: callData }, "latest"],
+        }),
+      });
+
+      const json = (await res.json()) as { result?: string; error?: { message: string } };
+      if (json.error) throw new Error(json.error.message);
+      if (!json.result || json.result === "0x") throw new Error("Empty RPC result");
+
+      const raw = BigInt(json.result);
       const formatted = formatUnits(raw, 6);
-      console.log(`[x402] Balance fetched: raw=${raw.toString()} formatted=${formatted} USDC`);
+
+      // Remember a working endpoint
+      if (i > 0) {
+        currentRpcIndex = (currentRpcIndex + i) % RPC_ENDPOINTS.length;
+      }
+
+      console.log(`[x402] Balance (direct RPC ${rpcUrl}): raw=${raw} formatted=${formatted} USDC`);
       return formatted;
     } catch (err) {
       lastError = err as Error;
-      console.warn(`[x402] RPC ${RPC_ENDPOINTS[(currentRpcIndex + retry) % RPC_ENDPOINTS.length]} failed:`, (err as Error).message);
+      console.warn(`[x402] Direct RPC ${rpcUrl} failed:`, lastError.message);
     }
   }
-  
-  throw lastError || new Error("All RPC endpoints failed");
+
+  throw lastError ?? new Error("All RPC endpoints failed");
 }
 
 /**
@@ -193,69 +200,52 @@ function balanceChanged(a: string, b: string): boolean {
 
 /**
  * Poll until balance differs from `before`, or give up after `maxAttempts` tries.
- * Total polling duration: up to ~60 seconds (increased for testnet delays)
- * Uses fresh RPC reads on each poll to ensure we see on-chain updates.
- * Cycles through RPC endpoints on each poll attempt for better freshness.
- * Returns true if balance changed, false if timeout
+ *
+ * Uses the direct JSON-RPC `fetchUsdcBalance` for every poll to bypass caching.
+ * Alternates between RPC endpoints on each attempt for maximum freshness.
+ * Returns true if balance changed, false if timeout.
  */
 async function pollBalanceChange(
   address: `0x${string}`,
   before: string,
   onUpdate: (b: string) => void,
-  maxAttempts = 60,  // Increased from 30 to 60 for testnet delays
-  intervalMs = 1000,
+  maxAttempts = 60,
+  intervalMs = 2000,
 ): Promise<boolean> {
-  console.log(`[x402] Starting balance polling. Before: ${before} USDC (parsed: ${parseFloat(before)})`);
-  
+  console.log(`[x402] Starting balance polling. Before: ${before} USDC`);
+
   for (let i = 0; i < maxAttempts; i++) {
-    // First check is faster (500ms), subsequent checks wait full interval
-    const delay = i === 0 ? 500 : intervalMs;
-    await new Promise((r) => setTimeout(r, delay));
-    
+    await new Promise((r) => setTimeout(r, i === 0 ? 1000 : intervalMs));
+
     try {
-      // Cycle through RPC endpoints on each attempt for better freshness
-      const rpcIndex = (currentRpcIndex + i) % RPC_ENDPOINTS.length;
-      const rpcUrl = RPC_ENDPOINTS[rpcIndex];
-      const freshClient = createFreshPublicClient(rpcUrl);
-      
-      const raw = await freshClient.readContract({
-        address: USDC_ADDRESS,
-        abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-        functionName: "balanceOf",
-        args: [address],
-        blockTag: "latest",
-      }) as bigint;
-      
-      const next = formatUnits(raw, 6);
+      // Rotate the preferred RPC so each poll hits a different node
+      currentRpcIndex = (currentRpcIndex + 1) % RPC_ENDPOINTS.length;
+      const next = await fetchUsdcBalance(address);
       onUpdate(next);
-      
+
       if (balanceChanged(next, before)) {
-        console.log(`[x402] ✅ Balance updated! Before: ${before} → After: ${next} USDC (took ${i + 1} attempts, RPC: ${rpcUrl})`);
+        console.log(`[x402] ✅ Balance changed! ${before} → ${next} USDC (attempt ${i + 1})`);
         return true;
       }
-      
-      // Log progress every 10 attempts
+
       if ((i + 1) % 10 === 0) {
-        console.log(`[x402] Still polling for balance change... (${i + 1}/${maxAttempts} attempts, current: ${next} USDC, RPC: ${rpcUrl})`);
+        console.log(`[x402] Polling… ${i + 1}/${maxAttempts}, current: ${next} USDC`);
       }
     } catch (err) {
-      console.warn(`[x402] Balance fetch failed on attempt ${i + 1}:`, (err as Error).message);
-      // Continue polling even if one fetch fails
+      console.warn(`[x402] Poll attempt ${i + 1} failed:`, (err as Error).message);
     }
   }
-  
-  console.log(`[x402] ❌ Balance polling completed after ${maxAttempts} attempts without detecting change`);
+
+  console.log(`[x402] ❌ Balance polling timed out after ${maxAttempts} attempts`);
   return false;
 }
 
 /**
- * Wait for a transaction to be confirmed on-chain, then refresh the balance.
- * This is more reliable than balance polling because it uses the actual txHash
- * to wait for blockchain confirmation, avoiding RPC caching issues.
+ * Wait for a transaction to confirm on-chain, then refresh the balance.
  *
- * When txHash IS available: wait for on-chain receipt, then refresh balance.
- * When txHash is NOT available: watch for USDC Transfer events from this address,
- * with balance polling as a fallback.
+ * Strategy 1 (txHash available): use `waitForTransactionReceipt` for fast
+ *   confirmation, then read the updated balance via direct RPC.
+ * Strategy 2 (no txHash): fall back to direct-RPC balance polling.
  */
 async function waitForTxAndRefreshBalance(
   address: `0x${string}`,
@@ -263,143 +253,38 @@ async function waitForTxAndRefreshBalance(
   txHash: string | undefined,
   onUpdate: (b: string) => void,
 ): Promise<boolean> {
+  // ── Strategy 1: wait for tx receipt ────────────────────────────────────────
   if (txHash) {
     try {
-      console.log(`[x402] 🔍 Waiting for transaction confirmation: ${txHash}`);
-      console.log(`[x402] Using RPC: ${RPC_ENDPOINTS[currentRpcIndex]}`);
+      console.log(`[x402] 🔍 Waiting for tx confirmation: ${txHash}`);
       const client = createFreshPublicClient();
-      const receipt = await client.waitForTransactionReceipt({
+      await client.waitForTransactionReceipt({
         hash: txHash as `0x${string}`,
         confirmations: 1,
-        timeout: 60_000, // 60 second timeout
+        timeout: 60_000,
       });
-      console.log(`[x402] ✅ Transaction confirmed on-chain: ${txHash}`);
-      console.log(`[x402] Transaction receipt - status: ${receipt.status}, blockNumber: ${receipt.blockNumber}, gasUsed: ${receipt.gasUsed}`);
+      console.log(`[x402] ✅ Transaction confirmed: ${txHash}`);
 
-      // Transaction confirmed — fetch updated balance
-      // Try multiple RPC endpoints as some may be behind
-      for (let rpcAttempt = 0; rpcAttempt < RPC_ENDPOINTS.length; rpcAttempt++) {
-        const rpcUrl = RPC_ENDPOINTS[(currentRpcIndex + rpcAttempt) % RPC_ENDPOINTS.length];
-        try {
-          const freshClient = createFreshPublicClient(rpcUrl);
-          const raw = await freshClient.readContract({
-            address: USDC_ADDRESS,
-            abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-            functionName: "balanceOf",
-            args: [address],
-            blockTag: "latest",
-          }) as bigint;
-          const newBalance = formatUnits(raw, 6);
-          console.log(`[x402] Post-tx balance from ${rpcUrl}: ${newBalance} USDC (before: ${balanceBefore})`);
-          onUpdate(newBalance);
+      // Give RPC nodes a moment to index the new state
+      await new Promise((r) => setTimeout(r, 2_000));
 
-          if (balanceChanged(newBalance, balanceBefore)) {
-            console.log(`[x402] ✅ Balance updated after tx confirmation! Before: ${balanceBefore} → After: ${newBalance} USDC`);
-            return true;
-          }
-        } catch (err) {
-          console.warn(`[x402] Post-tx balance fetch failed from ${rpcUrl}:`, (err as Error).message);
-        }
+      const newBalance = await fetchUsdcBalance(address);
+      onUpdate(newBalance);
+      if (balanceChanged(newBalance, balanceBefore)) {
+        console.log(`[x402] ✅ Balance updated: ${balanceBefore} → ${newBalance} USDC`);
+        return true;
       }
-
-      // Balance still same right after confirmation; give RPC a moment to catch up
-      console.log(`[x402] Balance unchanged immediately after confirmation. Waiting 3s for RPC to catch up...`);
-      await new Promise((r) => setTimeout(r, 3000));
-      
-      // Try all RPCs again after delay
-      for (let rpcAttempt = 0; rpcAttempt < RPC_ENDPOINTS.length; rpcAttempt++) {
-        const rpcUrl = RPC_ENDPOINTS[(currentRpcIndex + rpcAttempt) % RPC_ENDPOINTS.length];
-        try {
-          const freshClient = createFreshPublicClient(rpcUrl);
-          const raw = await freshClient.readContract({
-            address: USDC_ADDRESS,
-            abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-            functionName: "balanceOf",
-            args: [address],
-            blockTag: "latest",
-          }) as bigint;
-          const retryBalance = formatUnits(raw, 6);
-          console.log(`[x402] Retry balance from ${rpcUrl}: ${retryBalance} USDC (before: ${balanceBefore})`);
-          onUpdate(retryBalance);
-          
-          if (balanceChanged(retryBalance, balanceBefore)) {
-            console.log(`[x402] ✅ Balance updated after short delay! Before: ${balanceBefore} → After: ${retryBalance} USDC`);
-            return true;
-          }
-        } catch (err) {
-          console.warn(`[x402] Retry balance fetch failed from ${rpcUrl}:`, (err as Error).message);
-        }
-      }
-      
-      console.log(`[x402] ⚠️ Balance still unchanged after tx confirmation + retry. Falling back to extended polling.`);
+      // Still same – fall through to polling
+      console.log("[x402] ⚠️ Balance unchanged after tx confirmation, falling back to polling…");
     } catch (err) {
-      console.warn("[x402] ⚠️ waitForTransactionReceipt failed, falling back to balance polling:", (err as Error).message);
+      console.warn("[x402] waitForTransactionReceipt failed:", (err as Error).message);
     }
   } else {
-    console.log("[x402] ⚠️ No txHash available — watching for USDC Transfer events as primary strategy.");
-
-    // Watch for USDC Transfer events from this address (more reliable than balance polling)
-    try {
-      const client = createFreshPublicClient();
-      const EVENT_WATCH_TIMEOUT_MS = 30_000;
-      const RPC_SYNC_DELAY_MS = 1_000;
-
-      const transferDetected = await Promise.race([
-        // Strategy 1: Watch for Transfer events from our address
-        new Promise<boolean>((resolve) => {
-          const unwatch = client.watchContractEvent({
-            address: USDC_ADDRESS,
-            abi: [{
-              type: "event",
-              name: "Transfer",
-              inputs: [
-                { type: "address", indexed: true, name: "from" },
-                { type: "address", indexed: true, name: "to" },
-                { type: "uint256", indexed: false, name: "value" },
-              ],
-            }],
-            eventName: "Transfer",
-            args: { from: address },
-            onLogs: (logs) => {
-              if (logs.length > 0) {
-                console.log(`[x402] 🔔 Transfer event detected! ${logs.length} transfer(s) from ${address}`);
-                unwatch();
-                resolve(true);
-              }
-            },
-          });
-          // Clean up watcher after timeout
-          setTimeout(() => { unwatch(); resolve(false); }, EVENT_WATCH_TIMEOUT_MS);
-        }),
-        // Strategy 2: Concurrent balance polling (shorter duration)
-        pollBalanceChange(address, balanceBefore, onUpdate, 30, 1000),
-      ]);
-
-      if (transferDetected) {
-        // Transfer event detected — small delay for RPC nodes to sync the new state
-        await new Promise((r) => setTimeout(r, RPC_SYNC_DELAY_MS));
-        const freshClient = createFreshPublicClient();
-        const raw = await freshClient.readContract({
-          address: USDC_ADDRESS,
-          abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-          functionName: "balanceOf",
-          args: [address],
-          blockTag: "latest",
-        }) as bigint;
-        const newBalance = formatUnits(raw, 6);
-        onUpdate(newBalance);
-        console.log(`[x402] Balance after transfer event: ${newBalance} USDC (before: ${balanceBefore})`);
-        return balanceChanged(newBalance, balanceBefore) || true; // Transfer event = payment happened
-      }
-      
-      return false;
-    } catch (err) {
-      console.warn("[x402] Event watching failed, falling back to balance polling:", (err as Error).message);
-    }
+    console.log("[x402] ⚠️ No txHash — falling back to balance polling.");
   }
 
-  // Fallback: poll balance directly (used when event watching fails or receipt wait fails)
-  return pollBalanceChange(address, balanceBefore, onUpdate);
+  // ── Strategy 2: poll balance via direct RPC ────────────────────────────────
+  return pollBalanceChange(address, balanceBefore, onUpdate, 60, 2000);
 }
 
 // ─── Wallet hook ────────────────────────────────────────────────────────────
@@ -482,7 +367,7 @@ export default function App() {
     setWallet((w) => ({ ...w, balanceUpdating: true }));
     try {
       // Force refresh to get latest on-chain data
-      const newBalance = await fetchUsdcBalance(wallet.address, true);
+      const newBalance = await fetchUsdcBalance(wallet.address);
       setWallet((w) => ({ ...w, usdcBalance: newBalance, balanceUpdating: false }));
     } catch {
       setWallet((w) => ({ ...w, balanceUpdating: false }));
@@ -499,7 +384,7 @@ export default function App() {
     // Fetch current balance before payment to detect changes later
     // Force refresh to get accurate baseline
     const currentAddress = wallet.address;
-    const balanceBeforePayment = await fetchUsdcBalance(currentAddress, true);
+    const balanceBeforePayment = await fetchUsdcBalance(currentAddress);
 
     setRequests((r) => ({ ...r, [endpoint.id]: { status: "signing", data: null } }));
 
@@ -614,7 +499,7 @@ export default function App() {
       // Update balance immediately and poll for changes
       // The payment has been sent, so the balance should reduce once confirmed on-chain
       // Force refresh to get latest on-chain data after payment
-      const newBalance = await fetchUsdcBalance(currentAddress, true);
+      const newBalance = await fetchUsdcBalance(currentAddress);
       setWallet((w) => ({ ...w, usdcBalance: newBalance }));
       console.log(`[x402] Immediate post-payment balance: ${newBalance} USDC`);
       
