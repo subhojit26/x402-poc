@@ -7,7 +7,8 @@
     "build": "tsc",
     "prestart": "node -e \"if (!require('fs').existsSync('dist/server.js')) { console.error('\\n\\u274c dist/server.js not found. Run: npm run build\\n'); process.exit(1); }\"",
     "start": "node dist/server.js",
-    "dev": "tsx watch src/server.ts"
+    "dev": "tsx watch src/server.ts",
+    "test": "node --import tsx/esm --test src/server.test.ts"
   },
   "dependencies": {
     "@x402/core": "^2.5.0",
@@ -18,7 +19,9 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.0",
+    "@x402/fetch": "^2.5.0",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "viem": "^2.21.0"
   }
 }
