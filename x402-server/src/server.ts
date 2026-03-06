@@ -163,6 +163,7 @@ void (async () => {
 // settlement receipt into the JSON body so the client can always access it.
 app.use("/premium", (_req, res, next) => {
   const originalEnd = res.end.bind(res) as typeof res.end;
+  let injected = false;
 
   (res as { end: typeof res.end }).end = function (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -173,7 +174,8 @@ app.use("/premium", (_req, res, next) => {
       res.getHeader("X-PAYMENT-RESPONSE");
 
     const chunk = endArgs[0] as unknown;
-    if (paymentHeader && res.statusCode < 400 && chunk) {
+    if (!injected && paymentHeader && res.statusCode < 400 && chunk && !res.headersSent) {
+      injected = true;
       try {
         const bodyStr =
           typeof chunk === "string" ? chunk : (chunk as Buffer).toString();

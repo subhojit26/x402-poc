@@ -341,6 +341,9 @@ async function waitForTxAndRefreshBalance(
     // Watch for USDC Transfer events from this address (more reliable than balance polling)
     try {
       const client = createFreshPublicClient();
+      const EVENT_WATCH_TIMEOUT_MS = 30_000;
+      const RPC_SYNC_DELAY_MS = 1_000;
+
       const transferDetected = await Promise.race([
         // Strategy 1: Watch for Transfer events from our address
         new Promise<boolean>((resolve) => {
@@ -366,15 +369,15 @@ async function waitForTxAndRefreshBalance(
             },
           });
           // Clean up watcher after timeout
-          setTimeout(() => { unwatch(); resolve(false); }, 30_000);
+          setTimeout(() => { unwatch(); resolve(false); }, EVENT_WATCH_TIMEOUT_MS);
         }),
         // Strategy 2: Concurrent balance polling (shorter duration)
         pollBalanceChange(address, balanceBefore, onUpdate, 30, 1000),
       ]);
 
       if (transferDetected) {
-        // Transfer event detected — refresh balance
-        await new Promise((r) => setTimeout(r, 1000)); // Small delay for RPC to catch up
+        // Transfer event detected — small delay for RPC nodes to sync the new state
+        await new Promise((r) => setTimeout(r, RPC_SYNC_DELAY_MS));
         const freshClient = createFreshPublicClient();
         const raw = await freshClient.readContract({
           address: USDC_ADDRESS,
