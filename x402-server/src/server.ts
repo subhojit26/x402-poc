@@ -12,6 +12,10 @@ import express, { type Request, type Response, type RequestHandler } from "expre
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
+import { fileURLToPath } from "node:url";
+
+// True only when this file is the entry point (not when imported by tests)
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 
 const app = express();
 app.use(express.json());
@@ -137,11 +141,16 @@ const premiumRoutes = {
 let paymentMiddlewareInitialized = false;
 let premiumPaymentMiddleware: RequestHandler | undefined;
 
-void (async () => {
+/**
+ * Resolves to true when the x402 payment middleware is ready, false on failure.
+ * Exported so tests can await middleware readiness before making 402 assertions.
+ */
+export const middlewareReady: Promise<boolean> = (async () => {
   try {
     await resourceServer.initialize();
     premiumPaymentMiddleware = paymentMiddleware(premiumRoutes, resourceServer);
     paymentMiddlewareInitialized = true;
+    return true;
   } catch (error) {
     console.error(
       "x402 payment middleware unavailable; premium routes disabled. Check facilitator reachability and outbound network access.",
@@ -150,6 +159,7 @@ void (async () => {
         error,
       }
     );
+    return false;
   }
 })();
 
@@ -362,23 +372,30 @@ app.get("/", (_req: Request, res: Response) => {
 // Start
 // ─────────────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
-  console.log(`\n┌─────────────────────────────────────────────────────┐`);
-  console.log(`│            🚀 x402 Payment Server                    │`);
-  console.log(`├─────────────────────────────────────────────────────┤`);
-  const portStr = String(PORT);
-  console.log(`│  URL:       http://localhost:${portStr}${" ".repeat(Math.max(0, 19 - portStr.length))}│`);
-  console.log(`│  Network:   Base Sepolia (testnet)                   │`);
-  console.log(`│  Protocol:  x402 (HTTP 402 Payment Required)         │`);
-  console.log(`├─────────────────────────────────────────────────────┤`);
-  console.log(`│  FREE:                                               │`);
-  console.log(`│    GET /health                                       │`);
-  console.log(`│    GET /                                             │`);
-  console.log(`│  PAID (x402):                                        │`);
-  console.log(`│    GET /premium/weather         → $0.001 USDC        │`);
-  console.log(`│    GET /premium/news            → $0.001 USDC        │`);
-  console.log(`│    GET /premium/stock/:symbol   → $0.002 USDC        │`);
-  console.log(`│    GET /premium/music           → $0.003 USDC        │`);
-  console.log(`│    GET /premium/video           → $0.005 USDC        │`);
-  console.log(`└─────────────────────────────────────────────────────┘\n`);
-});
+// Export app for use in integration tests (tests import this module and start
+// their own listener on a random port — the listener below only fires when
+// running the server as the direct entry point).
+export { app };
+
+if (isMain) {
+  app.listen(PORT, () => {
+    console.log(`\n┌─────────────────────────────────────────────────────┐`);
+    console.log(`│            🚀 x402 Payment Server                    │`);
+    console.log(`├─────────────────────────────────────────────────────┤`);
+    const portStr = String(PORT);
+    console.log(`│  URL:       http://localhost:${portStr}${" ".repeat(Math.max(0, 19 - portStr.length))}│`);
+    console.log(`│  Network:   Base Sepolia (testnet)                   │`);
+    console.log(`│  Protocol:  x402 (HTTP 402 Payment Required)         │`);
+    console.log(`├─────────────────────────────────────────────────────┤`);
+    console.log(`│  FREE:                                               │`);
+    console.log(`│    GET /health                                       │`);
+    console.log(`│    GET /                                             │`);
+    console.log(`│  PAID (x402):                                        │`);
+    console.log(`│    GET /premium/weather         → $0.001 USDC        │`);
+    console.log(`│    GET /premium/news            → $0.001 USDC        │`);
+    console.log(`│    GET /premium/stock/:symbol   → $0.002 USDC        │`);
+    console.log(`│    GET /premium/music           → $0.003 USDC        │`);
+    console.log(`│    GET /premium/video           → $0.005 USDC        │`);
+    console.log(`└─────────────────────────────────────────────────────┘\n`);
+  });
+}

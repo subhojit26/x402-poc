@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { createWalletClient, custom, createPublicClient, http, formatUnits } from "viem";
+import { createWalletClient, custom, createPublicClient, http, formatUnits, encodeFunctionData } from "viem";
 import { baseSepolia } from "viem/chains";
 import { x402Client } from "@x402/core/client";
 import { ExactEvmScheme } from "@x402/evm/exact/client";
@@ -103,6 +103,13 @@ const RPC_ENDPOINTS = [
 // Keep track of which RPC endpoint is working best
 let currentRpcIndex = 0;
 
+// Module-level reference to the MetaMask provider, set when user connects wallet.
+// Using MetaMask's own provider for balance reads ensures the website always
+// displays the same balance as MetaMask (avoids public-RPC staleness/divergence).
+let metaMaskProvider: {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+} | null = null;
+
 /**
  * Create a fresh public client for each balance fetch to avoid stale cache.
  * Using `batch: false` and no caching ensures we always get fresh on-chain data.
@@ -130,19 +137,58 @@ function createFreshPublicClient(rpcUrl?: string) {
 const publicClient = createPublicClient({ chain: baseSepolia, transport: http() });
 
 /**
+ * Read USDC balance using MetaMask's own provider (eth_call).
+ * This ensures the displayed balance matches exactly what MetaMask shows,
+ * avoiding staleness or divergence from public RPC nodes.
+ * Returns null if the provider is unavailable or the call fails.
+ */
+async function fetchUsdcBalanceViaProvider(address: `0x${string}`): Promise<string | null> {
+  if (!metaMaskProvider) return null;
+  try {
+    // Use viem's encodeFunctionData for safe ABI encoding (handles checksums, validation)
+    const callData = encodeFunctionData({
+      abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
+      functionName: "balanceOf",
+      args: [address],
+    });
+    const result = await metaMaskProvider.request({
+      method: "eth_call",
+      params: [{ to: USDC_ADDRESS, data: callData }, "latest"],
+    });
+    // eth_call returns a hex string; validate before converting
+    if (typeof result !== "string" || !result.startsWith("0x")) {
+      console.warn("[x402] MetaMask eth_call returned unexpected result:", result);
+      return null;
+    }
+    const raw = BigInt(result);
+    const formatted = formatUnits(raw, 6);
+    console.log(`[x402] Balance via MetaMask provider: raw=${raw.toString()} formatted=${formatted} USDC`);
+    return formatted;
+  } catch (err) {
+    console.warn("[x402] MetaMask eth_call failed:", (err as Error).message);
+    return null;
+  }
+}
+
+/**
  * Fetch USDC balance with retry across multiple RPC endpoints.
- * Creates a fresh client for each read to avoid cached/stale data.
+ * Tries MetaMask's own provider first (most reliable, matches MetaMask display).
+ * Falls back to public RPC endpoints when the provider is unavailable.
  * @param address - Wallet address to check
  * @param forceRefresh - If true, creates a fresh client to bypass any caching
  */
 async function fetchUsdcBalance(address: `0x${string}`, forceRefresh = false): Promise<string> {
+  console.log(`[x402] fetchUsdcBalance called for ${address.slice(0, 8)}… forceRefresh=${forceRefresh} currentRpcIndex=${currentRpcIndex}`);
+
+  // Prefer MetaMask's provider — it reflects the same data the user sees in their wallet
+  const providerBalance = await fetchUsdcBalanceViaProvider(address);
+  if (providerBalance !== null) return providerBalance;
+
   const client = forceRefresh ? createFreshPublicClient() : publicClient;
   
   // Try current RPC, then fallback to others if it fails
   const maxRetries = RPC_ENDPOINTS.length;
   let lastError: Error | undefined;
-  
-  console.log(`[x402] fetchUsdcBalance called for ${address.slice(0, 8)}… forceRefresh=${forceRefresh} currentRpcIndex=${currentRpcIndex}`);
   
   for (let retry = 0; retry < maxRetries; retry++) {
     try {
@@ -194,8 +240,8 @@ function balanceChanged(a: string, b: string): boolean {
 /**
  * Poll until balance differs from `before`, or give up after `maxAttempts` tries.
  * Total polling duration: up to ~60 seconds (increased for testnet delays)
- * Uses fresh RPC reads on each poll to ensure we see on-chain updates.
- * Cycles through RPC endpoints on each poll attempt for better freshness.
+ * Prefers MetaMask's own provider for reads (matches what the user sees in MetaMask).
+ * Cycles through public RPC endpoints as fallback on each poll attempt.
  * Returns true if balance changed, false if timeout
  */
 async function pollBalanceChange(
@@ -213,30 +259,40 @@ async function pollBalanceChange(
     await new Promise((r) => setTimeout(r, delay));
     
     try {
-      // Cycle through RPC endpoints on each attempt for better freshness
-      const rpcIndex = (currentRpcIndex + i) % RPC_ENDPOINTS.length;
-      const rpcUrl = RPC_ENDPOINTS[rpcIndex];
-      const freshClient = createFreshPublicClient(rpcUrl);
-      
-      const raw = await freshClient.readContract({
-        address: USDC_ADDRESS,
-        abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-        functionName: "balanceOf",
-        args: [address],
-        blockTag: "latest",
-      }) as bigint;
-      
-      const next = formatUnits(raw, 6);
+      let next: string | null = null;
+
+      // Prefer MetaMask provider — same data source the user sees in their wallet
+      next = await fetchUsdcBalanceViaProvider(address);
+
+      // Fall back to public RPC if provider is unavailable
+      if (next === null) {
+        const rpcIndex = (currentRpcIndex + i) % RPC_ENDPOINTS.length;
+        const rpcUrl = RPC_ENDPOINTS[rpcIndex];
+        const freshClient = createFreshPublicClient(rpcUrl);
+        const raw = await freshClient.readContract({
+          address: USDC_ADDRESS,
+          abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
+          functionName: "balanceOf",
+          args: [address],
+          blockTag: "latest",
+        }) as bigint;
+        next = formatUnits(raw, 6);
+        // Log which RPC is being used (only every 10 attempts to reduce noise)
+        if ((i + 1) % 10 === 0) {
+          console.log(`[x402] Still polling for balance change... (${i + 1}/${maxAttempts} attempts, current: ${next} USDC, RPC: ${rpcUrl})`);
+        }
+      }
+
       onUpdate(next);
       
       if (balanceChanged(next, before)) {
-        console.log(`[x402] ✅ Balance updated! Before: ${before} → After: ${next} USDC (took ${i + 1} attempts, RPC: ${rpcUrl})`);
+        console.log(`[x402] ✅ Balance updated! Before: ${before} → After: ${next} USDC (took ${i + 1} attempts)`);
         return true;
       }
       
-      // Log progress every 10 attempts
-      if ((i + 1) % 10 === 0) {
-        console.log(`[x402] Still polling for balance change... (${i + 1}/${maxAttempts} attempts, current: ${next} USDC, RPC: ${rpcUrl})`);
+      // Log progress every 10 attempts when using MetaMask provider
+      if (metaMaskProvider && (i + 1) % 10 === 0) {
+        console.log(`[x402] Still polling for balance change... (${i + 1}/${maxAttempts} attempts, current: ${next} USDC, via MetaMask provider)`);
       }
     } catch (err) {
       console.warn(`[x402] Balance fetch failed on attempt ${i + 1}:`, (err as Error).message);
@@ -249,18 +305,103 @@ async function pollBalanceChange(
 }
 
 /**
- * Wait for a transaction to be confirmed on-chain, then refresh the balance.
- * This is more reliable than balance polling because it uses the actual txHash
- * to wait for blockchain confirmation, avoiding RPC caching issues.
+ * Get the current chain block number via MetaMask provider (most accurate),
+ * falling back to a fresh public RPC client.
+ */
+async function getLatestBlockNumber(): Promise<bigint> {
+  if (metaMaskProvider) {
+    try {
+      const result = await metaMaskProvider.request({ method: "eth_blockNumber", params: [] });
+      if (typeof result === "string" && result.startsWith("0x")) {
+        return BigInt(result);
+      }
+    } catch { /* fall through to public RPC */ }
+  }
+  return createFreshPublicClient().getBlockNumber();
+}
+
+/**
+ * Check for USDC Transfer events FROM `fromAddress` starting at `fromBlock`.
  *
- * When txHash IS available: wait for on-chain receipt, then refresh balance.
- * When txHash is NOT available: watch for USDC Transfer events from this address,
- * with balance polling as a fallback.
+ * Uses eth_getLogs (plain HTTP) rather than WebSocket subscriptions because:
+ *  1. Works on every public RPC — no eth_subscribe support needed.
+ *  2. Queries historical blocks, so it catches transfers that were mined BEFORE
+ *     the watcher started (which watchContractEvent cannot do).
+ */
+async function hasUsdcTransferFrom(
+  fromAddress: `0x${string}`,
+  fromBlock: bigint,
+): Promise<boolean> {
+  // keccak256("Transfer(address,address,uint256)")
+  const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+  // EVM log topics are 32 bytes; address is left-padded with 12 zero bytes
+  const paddedAddr = `0x000000000000000000000000${fromAddress.slice(2).toLowerCase()}`;
+  const fromBlockHex = `0x${fromBlock.toString(16)}`;
+
+  // Prefer MetaMask provider — queries the same RPC the wallet trusts
+  if (metaMaskProvider) {
+    try {
+      const result = await metaMaskProvider.request({
+        method: "eth_getLogs",
+        params: [{
+          fromBlock: fromBlockHex,
+          toBlock: "latest",
+          address: USDC_ADDRESS,
+          topics: [TRANSFER_TOPIC, paddedAddr],
+        }],
+      });
+      if (Array.isArray(result)) {
+        if (result.length > 0) {
+          console.log(`[x402] 🔍 Found ${result.length} USDC Transfer(s) from ${fromAddress.slice(0, 8)}… via eth_getLogs`);
+        }
+        return result.length > 0;
+      }
+    } catch (err) {
+      console.warn("[x402] eth_getLogs (MetaMask) failed:", (err as Error).message);
+    }
+  }
+
+  // Fallback: public RPC getLogs
+  try {
+    const logs = await createFreshPublicClient().getLogs({
+      address: USDC_ADDRESS,
+      event: {
+        type: "event",
+        name: "Transfer",
+        inputs: [
+          { type: "address", indexed: true, name: "from" },
+          { type: "address", indexed: true, name: "to" },
+          { type: "uint256", indexed: false, name: "value" },
+        ],
+      },
+      args: { from: fromAddress },
+      fromBlock,
+      toBlock: "latest",
+    });
+    if (logs.length > 0) {
+      console.log(`[x402] 🔍 Found ${logs.length} USDC Transfer(s) from ${fromAddress.slice(0, 8)}… via public RPC getLogs`);
+    }
+    return logs.length > 0;
+  } catch (err) {
+    console.warn("[x402] getLogs (public RPC) failed:", (err as Error).message);
+    return false;
+  }
+}
+
+/**
+ * Wait for a transaction to be confirmed on-chain, then refresh the balance.
+ *
+ * When txHash IS available: wait for on-chain receipt via waitForTransactionReceipt,
+ * then refresh the balance.
+ * When txHash is NOT available: poll for USDC Transfer events via eth_getLogs
+ * (HTTP, no WebSocket needed) starting from `paymentStartBlock`, with a direct
+ * balance check on every iteration as a parallel signal.
  */
 async function waitForTxAndRefreshBalance(
   address: `0x${string}`,
   balanceBefore: string,
   txHash: string | undefined,
+  paymentStartBlock: bigint,
   onUpdate: (b: string) => void,
 ): Promise<boolean> {
   if (txHash) {
@@ -277,7 +418,16 @@ async function waitForTxAndRefreshBalance(
       console.log(`[x402] Transaction receipt - status: ${receipt.status}, blockNumber: ${receipt.blockNumber}, gasUsed: ${receipt.gasUsed}`);
 
       // Transaction confirmed — fetch updated balance
-      // Try multiple RPC endpoints as some may be behind
+      // Prefer MetaMask provider, then try multiple RPCs as fallback
+      const providerBalance = await fetchUsdcBalanceViaProvider(address);
+      if (providerBalance !== null) {
+        onUpdate(providerBalance);
+        if (balanceChanged(providerBalance, balanceBefore)) {
+          console.log(`[x402] ✅ Balance updated after tx confirmation (MetaMask provider)! Before: ${balanceBefore} → After: ${providerBalance} USDC`);
+          return true;
+        }
+      }
+
       for (let rpcAttempt = 0; rpcAttempt < RPC_ENDPOINTS.length; rpcAttempt++) {
         const rpcUrl = RPC_ENDPOINTS[(currentRpcIndex + rpcAttempt) % RPC_ENDPOINTS.length];
         try {
@@ -306,7 +456,16 @@ async function waitForTxAndRefreshBalance(
       console.log(`[x402] Balance unchanged immediately after confirmation. Waiting 3s for RPC to catch up...`);
       await new Promise((r) => setTimeout(r, 3000));
       
-      // Try all RPCs again after delay
+      // Try MetaMask provider again, then all RPCs after delay
+      const providerBalance2 = await fetchUsdcBalanceViaProvider(address);
+      if (providerBalance2 !== null) {
+        onUpdate(providerBalance2);
+        if (balanceChanged(providerBalance2, balanceBefore)) {
+          console.log(`[x402] ✅ Balance updated after short delay (MetaMask provider)! Before: ${balanceBefore} → After: ${providerBalance2} USDC`);
+          return true;
+        }
+      }
+
       for (let rpcAttempt = 0; rpcAttempt < RPC_ENDPOINTS.length; rpcAttempt++) {
         const rpcUrl = RPC_ENDPOINTS[(currentRpcIndex + rpcAttempt) % RPC_ENDPOINTS.length];
         try {
@@ -336,66 +495,59 @@ async function waitForTxAndRefreshBalance(
       console.warn("[x402] ⚠️ waitForTransactionReceipt failed, falling back to balance polling:", (err as Error).message);
     }
   } else {
-    console.log("[x402] ⚠️ No txHash available — watching for USDC Transfer events as primary strategy.");
+    // No txHash — poll for USDC Transfer events using eth_getLogs + balance check.
+    // eth_getLogs is HTTP-based (no WebSocket needed) and catches transfers that
+    // were already mined before this function was called, which watchContractEvent
+    // cannot do.
+    console.log(`[x402] ⚠️ No txHash — polling for USDC Transfer events from block ${paymentStartBlock}…`);
 
-    // Watch for USDC Transfer events from this address (more reliable than balance polling)
-    try {
-      const client = createFreshPublicClient();
-      const EVENT_WATCH_TIMEOUT_MS = 30_000;
-      const RPC_SYNC_DELAY_MS = 1_000;
+    const POLL_INTERVAL_MS = 2_000;
+    const MAX_WAIT_MS = 60_000;
+    const RPC_SYNC_DELAY_MS = 500; // brief delay after detecting event for RPC state to propagate
+    const startTime = Date.now();
+    let attempt = 0;
 
-      const transferDetected = await Promise.race([
-        // Strategy 1: Watch for Transfer events from our address
-        new Promise<boolean>((resolve) => {
-          const unwatch = client.watchContractEvent({
-            address: USDC_ADDRESS,
-            abi: [{
-              type: "event",
-              name: "Transfer",
-              inputs: [
-                { type: "address", indexed: true, name: "from" },
-                { type: "address", indexed: true, name: "to" },
-                { type: "uint256", indexed: false, name: "value" },
-              ],
-            }],
-            eventName: "Transfer",
-            args: { from: address },
-            onLogs: (logs) => {
-              if (logs.length > 0) {
-                console.log(`[x402] 🔔 Transfer event detected! ${logs.length} transfer(s) from ${address}`);
-                unwatch();
-                resolve(true);
-              }
-            },
-          });
-          // Clean up watcher after timeout
-          setTimeout(() => { unwatch(); resolve(false); }, EVENT_WATCH_TIMEOUT_MS);
-        }),
-        // Strategy 2: Concurrent balance polling (shorter duration)
-        pollBalanceChange(address, balanceBefore, onUpdate, 30, 1000),
-      ]);
+    while (Date.now() - startTime < MAX_WAIT_MS) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      attempt++;
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
 
-      if (transferDetected) {
-        // Transfer event detected — small delay for RPC nodes to sync the new state
-        await new Promise((r) => setTimeout(r, RPC_SYNC_DELAY_MS));
-        const freshClient = createFreshPublicClient();
-        const raw = await freshClient.readContract({
-          address: USDC_ADDRESS,
-          abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-          functionName: "balanceOf",
-          args: [address],
-          blockTag: "latest",
-        }) as bigint;
-        const newBalance = formatUnits(raw, 6);
+      try {
+        // Primary signal: on-chain Transfer event — definitive proof payment executed
+        const transferFound = await hasUsdcTransferFrom(address, paymentStartBlock);
+        if (transferFound) {
+          await new Promise((r) => setTimeout(r, RPC_SYNC_DELAY_MS));
+          const newBalance = await fetchUsdcBalance(address, true);
+          onUpdate(newBalance);
+          console.log(`[x402] ✅ USDC Transfer confirmed on-chain! Balance: ${newBalance} USDC (before: ${balanceBefore})`);
+          return true;
+        }
+
+        // Secondary signal: direct balance change (catches cases where getLogs is unavailable)
+        const newBalance = await fetchUsdcBalance(address, true);
         onUpdate(newBalance);
-        console.log(`[x402] Balance after transfer event: ${newBalance} USDC (before: ${balanceBefore})`);
-        return balanceChanged(newBalance, balanceBefore) || true; // Transfer event = payment happened
+        if (balanceChanged(newBalance, balanceBefore)) {
+          console.log(`[x402] ✅ Balance updated! Before: ${balanceBefore} → After: ${newBalance} USDC`);
+          return true;
+        }
+
+        if (attempt % 5 === 0) {
+          console.log(
+            `[x402] Waiting for on-chain confirmation… ` +
+            `(attempt ${attempt}, ${elapsed}s elapsed, balance: ${newBalance} USDC)`
+          );
+        }
+      } catch (err) {
+        console.warn(`[x402] Poll error on attempt ${attempt}:`, (err as Error).message);
       }
-      
-      return false;
-    } catch (err) {
-      console.warn("[x402] Event watching failed, falling back to balance polling:", (err as Error).message);
     }
+
+    console.log(
+      `[x402] ❌ No USDC Transfer event or balance change detected after ` +
+      `${Math.round(MAX_WAIT_MS / 1000)}s. ` +
+      "The facilitator may not have executed the payment on-chain yet."
+    );
+    return false;
   }
 
   // Fallback: poll balance directly (used when event watching fails or receipt wait fails)
@@ -461,7 +613,10 @@ export default function App() {
         }
       }
 
-      // Read USDC balance
+      // Store the provider reference so balance reads use the same RPC as MetaMask
+      metaMaskProvider = eth;
+
+      // Read USDC balance (will use MetaMask provider now that it's set)
       const usdcBalance = await fetchUsdcBalance(address);
 
       setWallet({
@@ -495,6 +650,27 @@ export default function App() {
 
     const eth = (window as unknown as { ethereum?: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown>}; }).ethereum;
     if (!eth) return;
+
+    // Always keep the module-level provider reference fresh so that balance reads
+    // via MetaMask's own eth_call stay accurate throughout the payment flow.
+    metaMaskProvider = eth;
+
+    // Capture block number NOW — before the payment is sent — so that the
+    // eth_getLogs query in waitForTxAndRefreshBalance doesn't miss the Transfer
+    // event that is mined while fetchWithPayment is executing.
+    // On failure, use a safe recent-block fallback (current block minus 10) to
+    // avoid scanning the entire chain history.
+    let paymentStartBlock: bigint;
+    try {
+      paymentStartBlock = await getLatestBlockNumber();
+    } catch {
+      // Safe fallback: best-effort estimate of a recent block. We use a small
+      // negative offset so that even if the block lookup fails we never query
+      // from block 0 (which would scan the entire chain history).
+      const roughBlock = Math.floor(Date.now() / 2000); // ~2-second block time on Base Sepolia
+      paymentStartBlock = BigInt(Math.max(0, roughBlock - 10));
+      console.warn(`[x402] Failed to get block number; using estimated fallback: ${paymentStartBlock}`);
+    }
 
     // Fetch current balance before payment to detect changes later
     // Force refresh to get accurate baseline
@@ -629,6 +805,7 @@ export default function App() {
           currentAddress,
           balanceBeforePayment,
           txHash,
+          paymentStartBlock,
           (b) => setWallet((w) => ({ ...w, usdcBalance: b })),
         );
         

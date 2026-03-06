@@ -114,6 +114,62 @@ cd conventional-client && npm start
 
 ---
 
+## Running the Integration Tests
+
+The `x402-server` has a test suite covering free endpoints, CORS headers, 402
+responses, and (optionally) full end-to-end pay & fetch with on-chain balance
+verification.
+
+### Groups 1–3 (no wallet needed)
+
+```bash
+cd x402-server
+npm test
+```
+
+These always run and cover:
+- `GET /` and `GET /health` shape assertions
+- CORS preflight and exposed-header list
+- All 5 premium endpoints returning HTTP 402 without a payment header
+
+### Group 4 — Pay & fetch (requires a testnet wallet)
+
+**Step 1 — Create your `.env` from the template:**
+
+```bash
+cp x402-server/.env.example x402-server/.env
+```
+
+Open `x402-server/.env` and replace the placeholder with your private key:
+
+```
+EVM_PRIVATE_KEY=0xYOUR_TESTNET_PRIVATE_KEY_HERE
+```
+
+> ⚠️ Use a **testnet-only** wallet. Never paste a mainnet key anywhere.  
+> The `.env` file is already excluded by `.gitignore` so it won't be committed.
+
+**Step 2 — Fund the wallet:**
+
+1. Go to <https://portal.cdp.coinbase.com/products/faucet>
+2. Select **Base Sepolia** network and **USDC** token
+3. You need at least **$0.012 USDC** to cover all 5 test endpoints
+
+**Step 3 — Run all tests:**
+
+```bash
+cd x402-server
+npm test
+```
+
+`npm test` automatically loads `x402-server/.env` when it exists. When
+`EVM_PRIVATE_KEY` is set the pay & fetch group runs and verifies:
+- The server returns HTTP 200 with the correct JSON shape
+- An on-chain USDC `Transfer` event is found in `eth_getLogs` (proof of settlement)
+- Your wallet balance decreased by exactly the endpoint's price
+
+---
+
 ## What You'll See
 
 ### Running the x402 client
