@@ -544,7 +544,6 @@ export default function App() {
   const [wallet, setWallet] = useState<WalletState>({ loading: false });
   const [requests, setRequests] = useState<Record<string, RequestState>>({});
   const [receiverInput, setReceiverInput] = useState("");
-  const [receiverSecret, setReceiverSecret] = useState("");
   const [receiverSaved, setReceiverSaved] = useState("");
   const [receiverSaving, setReceiverSaving] = useState(false);
   const [receiverError, setReceiverError] = useState("");
@@ -575,7 +574,7 @@ export default function App() {
       const r = await fetch(`${SERVER_URL}/config/receiver`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address: addr, secret: receiverSecret || undefined }),
+        body: JSON.stringify({ address: addr }),
       });
       const data = await r.json() as { success: boolean; error?: string };
       if (data.success) {
@@ -926,13 +925,6 @@ export default function App() {
               value={receiverInput}
               onChange={(e) => { setReceiverInput(e.target.value); setReceiverError(""); }}
               spellCheck={false}
-            />
-            <input
-              style={{ ...styles.receiverInput, width: 140, marginLeft: 8 }}
-              type="password"
-              placeholder="Admin secret"
-              value={receiverSecret}
-              onChange={(e) => { setReceiverSecret(e.target.value); setReceiverError(""); }}
             />
             <button
               style={{ ...styles.btn, ...(receiverSaving ? styles.btnDisabled : styles.btnSave) }}

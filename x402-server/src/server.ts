@@ -353,16 +353,7 @@ app.get("/premium/video", (_req: Request, res: Response) => {
 
 // Update the payment receiver address at runtime (no restart needed)
 app.post("/config/receiver", async (req: Request, res: Response) => {
-  const ADMIN_SECRET = process.env.ADMIN_SECRET;
-  const { address, secret } = req.body as { address?: string; secret?: string };
-
-  // If ADMIN_SECRET is configured, require it to prevent unauthorised receiver changes
-  if (ADMIN_SECRET) {
-    if (!secret || secret !== ADMIN_SECRET) {
-      return res.status(401).json({ success: false, error: "Unauthorised: invalid admin secret" });
-    }
-  }
-
+  const { address } = req.body as { address?: string };
   if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
     return res.status(400).json({ success: false, error: "Invalid EVM address" });
   }
