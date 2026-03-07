@@ -245,6 +245,45 @@ describe("Premium endpoints — unauthenticated (expect 402)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 3b. Middleware route matching — verify x402 middleware properly intercepts
+//     all premium routes (not bypassed due to Express path stripping)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Middleware route matching", () => {
+  // These tests ensure the x402 middleware receives the full req.path including
+  // the /premium prefix. If the middleware were mounted at app.use("/premium"),
+  // Express would strip the prefix and route matching would silently fail,
+  // causing premium endpoints to return 200 without payment.
+
+  test("Premium endpoints never return 200 without payment", async () => {
+    const paths = [
+      "/premium/weather",
+      "/premium/news",
+      "/premium/stock/AAPL",
+      "/premium/music",
+      "/premium/video",
+    ];
+    for (const path of paths) {
+      const res = await fetch(`${baseUrl}${path}`);
+      // Should be 402 (payment required) or 503 (middleware unavailable).
+      // Must NEVER be 200 — that would mean payment was bypassed.
+      assert.ok(
+        res.status === 402 || res.status === 503,
+        `${path}: expected 402 or 503 (payment gating), got ${res.status} — ` +
+        "payment middleware may not be intercepting this route",
+      );
+    }
+  });
+
+  test("Free endpoints still return 200", async () => {
+    for (const path of ["/", "/health"]) {
+      const res = await fetch(`${baseUrl}${path}`);
+      assert.equal(res.status, 200, `${path}: expected 200, got ${res.status}`);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 4. Pay & fetch — full payment flow with on-chain balance verification
 //    Skipped when EVM_PRIVATE_KEY is not configured.
 // ─────────────────────────────────────────────────────────────────────────────

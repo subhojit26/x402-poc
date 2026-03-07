@@ -103,7 +103,7 @@ const premiumRoutes = {
     description: "Latest news headlines (testnet demo)",
     mimeType: "application/json",
   },
-  "GET /premium/stock/:symbol": {
+  "GET /premium/stock/[symbol]": {
     accepts: {
       scheme: "exact",
       price: "$0.002", // More expensive — more valuable data
@@ -205,7 +205,11 @@ app.use("/premium", (_req, res, next) => {
   next();
 });
 
-app.use("/premium", (req, res, next) => {
+// Mount at root so req.path retains the /premium prefix.
+// x402 paymentMiddleware matches routes using req.path; Express's app.use("/premium")
+// would strip the prefix, causing all route patterns to silently fail to match.
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/premium")) return next();
   if (!paymentMiddlewareInitialized || !premiumPaymentMiddleware) {
     return res.status(503).json({
       success: false,
