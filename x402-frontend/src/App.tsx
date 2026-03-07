@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { createWalletClient, custom, createPublicClient, http, formatUnits, encodeFunctionData } from "viem";
 import { baseSepolia } from "viem/chains";
 import { x402Client } from "@x402/core/client";
@@ -417,80 +417,49 @@ async function waitForTxAndRefreshBalance(
       console.log(`[x402] ✅ Transaction confirmed on-chain: ${txHash}`);
       console.log(`[x402] Transaction receipt - status: ${receipt.status}, blockNumber: ${receipt.blockNumber}, gasUsed: ${receipt.gasUsed}`);
 
-      // Transaction confirmed — fetch updated balance
-      // Prefer MetaMask provider, then try multiple RPCs as fallback
-      const providerBalance = await fetchUsdcBalanceViaProvider(address);
-      if (providerBalance !== null) {
-        onUpdate(providerBalance);
-        if (balanceChanged(providerBalance, balanceBefore)) {
-          console.log(`[x402] ✅ Balance updated after tx confirmation (MetaMask provider)! Before: ${balanceBefore} → After: ${providerBalance} USDC`);
-          return true;
-        }
-      }
+      // On-chain confirmation with success status is the ground truth.
+      // Poll the public RPC at "latest" until the balance differs from balanceBefore.
+      // We intentionally avoid passing blockNumber because public (non-archive) RPCs
+      // like sepolia.base.org reject historical eth_call with "header not found".
+      if (receipt.status === "success") {
+        const BALANCE_POLL_INTERVAL_MS = 1_500;
+        const BALANCE_MAX_ATTEMPTS = 8; // up to ~12 s
+        const balanceAbi = [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }] as const;
+        let lastBalance = balanceBefore;
 
-      for (let rpcAttempt = 0; rpcAttempt < RPC_ENDPOINTS.length; rpcAttempt++) {
-        const rpcUrl = RPC_ENDPOINTS[(currentRpcIndex + rpcAttempt) % RPC_ENDPOINTS.length];
-        try {
-          const freshClient = createFreshPublicClient(rpcUrl);
-          const raw = await freshClient.readContract({
-            address: USDC_ADDRESS,
-            abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-            functionName: "balanceOf",
-            args: [address],
-            blockTag: "latest",
-          }) as bigint;
-          const newBalance = formatUnits(raw, 6);
-          console.log(`[x402] Post-tx balance from ${rpcUrl}: ${newBalance} USDC (before: ${balanceBefore})`);
-          onUpdate(newBalance);
+        for (let attempt = 0; attempt < BALANCE_MAX_ATTEMPTS; attempt++) {
+          try {
+            const freshClient = createFreshPublicClient();
+            const raw = await freshClient.readContract({
+              address: USDC_ADDRESS,
+              abi: balanceAbi,
+              functionName: "balanceOf",
+              args: [address],
+              // No blockNumber — "latest" works on all public RPCs
+            }) as bigint;
+            lastBalance = formatUnits(raw, 6);
 
-          if (balanceChanged(newBalance, balanceBefore)) {
-            console.log(`[x402] ✅ Balance updated after tx confirmation! Before: ${balanceBefore} → After: ${newBalance} USDC`);
-            return true;
+            if (balanceChanged(lastBalance, balanceBefore)) {
+              onUpdate(lastBalance);
+              console.log(`[x402] ✅ Balance confirmed via public RPC (attempt ${attempt + 1}): ${lastBalance} USDC (before: ${balanceBefore})`);
+              break;
+            }
+            // RPC hasn't propagated the block yet — wait and retry
+            console.log(`[x402] ⏳ Public RPC still shows old balance (attempt ${attempt + 1}/${BALANCE_MAX_ATTEMPTS}), retrying…`);
+            await new Promise((r) => setTimeout(r, BALANCE_POLL_INTERVAL_MS));
+          } catch (err) {
+            console.warn(`[x402] Balance read attempt ${attempt + 1} failed:`, (err as Error).message);
+            await new Promise((r) => setTimeout(r, BALANCE_POLL_INTERVAL_MS));
           }
-        } catch (err) {
-          console.warn(`[x402] Post-tx balance fetch failed from ${rpcUrl}:`, (err as Error).message);
         }
+
+        // Always call onUpdate with whatever we last read (correct for payer==receiver case)
+        onUpdate(lastBalance);
+        return true;
       }
 
-      // Balance still same right after confirmation; give RPC a moment to catch up
-      console.log(`[x402] Balance unchanged immediately after confirmation. Waiting 3s for RPC to catch up...`);
-      await new Promise((r) => setTimeout(r, 3000));
-      
-      // Try MetaMask provider again, then all RPCs after delay
-      const providerBalance2 = await fetchUsdcBalanceViaProvider(address);
-      if (providerBalance2 !== null) {
-        onUpdate(providerBalance2);
-        if (balanceChanged(providerBalance2, balanceBefore)) {
-          console.log(`[x402] ✅ Balance updated after short delay (MetaMask provider)! Before: ${balanceBefore} → After: ${providerBalance2} USDC`);
-          return true;
-        }
-      }
-
-      for (let rpcAttempt = 0; rpcAttempt < RPC_ENDPOINTS.length; rpcAttempt++) {
-        const rpcUrl = RPC_ENDPOINTS[(currentRpcIndex + rpcAttempt) % RPC_ENDPOINTS.length];
-        try {
-          const freshClient = createFreshPublicClient(rpcUrl);
-          const raw = await freshClient.readContract({
-            address: USDC_ADDRESS,
-            abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
-            functionName: "balanceOf",
-            args: [address],
-            blockTag: "latest",
-          }) as bigint;
-          const retryBalance = formatUnits(raw, 6);
-          console.log(`[x402] Retry balance from ${rpcUrl}: ${retryBalance} USDC (before: ${balanceBefore})`);
-          onUpdate(retryBalance);
-          
-          if (balanceChanged(retryBalance, balanceBefore)) {
-            console.log(`[x402] ✅ Balance updated after short delay! Before: ${balanceBefore} → After: ${retryBalance} USDC`);
-            return true;
-          }
-        } catch (err) {
-          console.warn(`[x402] Retry balance fetch failed from ${rpcUrl}:`, (err as Error).message);
-        }
-      }
-      
-      console.log(`[x402] ⚠️ Balance still unchanged after tx confirmation + retry. Falling back to extended polling.`);
+      // Receipt reverted — fall through to polling as last resort
+      console.log(`[x402] ⚠️ Receipt status: ${receipt.status}. Falling back to balance polling.`);
     } catch (err) {
       console.warn("[x402] ⚠️ waitForTransactionReceipt failed, falling back to balance polling:", (err as Error).message);
     }
@@ -502,7 +471,10 @@ async function waitForTxAndRefreshBalance(
     console.log(`[x402] ⚠️ No txHash — polling for USDC Transfer events from block ${paymentStartBlock}…`);
 
     const POLL_INTERVAL_MS = 2_000;
-    const MAX_WAIT_MS = 60_000;
+    // Without a txHash the facilitator may not have submitted anything on-chain yet.
+    // Wait up to 30 s — enough to catch late-arriving testnet transactions without
+    // blocking the UI for a full minute when the facilitator never settles.
+    const MAX_WAIT_MS = 30_000;
     const RPC_SYNC_DELAY_MS = 500; // brief delay after detecting event for RPC state to propagate
     const startTime = Date.now();
     let attempt = 0;
@@ -545,7 +517,9 @@ async function waitForTxAndRefreshBalance(
     console.log(
       `[x402] ❌ No USDC Transfer event or balance change detected after ` +
       `${Math.round(MAX_WAIT_MS / 1000)}s. ` +
-      "The facilitator may not have executed the payment on-chain yet."
+      "The facilitator accepted the payment but has not submitted an on-chain transaction yet. " +
+      "This is a known testnet issue — the facilitator may settle later or be temporarily unavailable. " +
+      "Check BaseScan for your wallet address to see if a transaction appears."
     );
     return false;
   }
@@ -569,6 +543,55 @@ interface WalletState {
 export default function App() {
   const [wallet, setWallet] = useState<WalletState>({ loading: false });
   const [requests, setRequests] = useState<Record<string, RequestState>>({});
+  const [receiverInput, setReceiverInput] = useState("");
+  const [receiverSecret, setReceiverSecret] = useState("");
+  const [receiverSaved, setReceiverSaved] = useState("");
+  const [receiverSaving, setReceiverSaving] = useState(false);
+  const [receiverError, setReceiverError] = useState("");
+
+  // Load current receiver from server on mount
+  const loadReceiver = useCallback(async () => {
+    try {
+      const r = await fetch(`${SERVER_URL}/health`);
+      if (r.ok) {
+        const data = await r.json() as { receiverAddress?: string };
+        if (data.receiverAddress) {
+          setReceiverSaved(data.receiverAddress);
+          setReceiverInput(data.receiverAddress);
+        }
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  const saveReceiver = useCallback(async () => {
+    const addr = receiverInput.trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
+      setReceiverError("Invalid EVM address (must be 0x + 40 hex chars)");
+      return;
+    }
+    setReceiverError("");
+    setReceiverSaving(true);
+    try {
+      const r = await fetch(`${SERVER_URL}/config/receiver`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: addr, secret: receiverSecret || undefined }),
+      });
+      const data = await r.json() as { success: boolean; error?: string };
+      if (data.success) {
+        setReceiverSaved(addr);
+      } else {
+        setReceiverError(data.error ?? "Failed to update receiver");
+      }
+    } catch (e) {
+      setReceiverError((e as Error).message);
+    } finally {
+      setReceiverSaving(false);
+    }
+  }, [receiverInput]);
+
+  // Load receiver address when component mounts
+  useEffect(() => { loadReceiver(); }, [loadReceiver]);
 
   // ── Connect Wallet ─────────────────────────────────────────────────────────
   const connectWallet = useCallback(async () => {
@@ -794,30 +817,36 @@ export default function App() {
       setWallet((w) => ({ ...w, usdcBalance: newBalance }));
       console.log(`[x402] Immediate post-payment balance: ${newBalance} USDC`);
       
-      // If balance hasn't changed yet (blockchain confirmation pending), wait for tx confirmation
-      if (!balanceChanged(newBalance, balanceBeforePayment)) {
-        console.log(`[x402] ⏳ Balance unchanged (${newBalance} === ${balanceBeforePayment}). Starting tx confirmation wait...`);
-        // Mark that we're waiting for balance update
+      // When we have a txHash, always wait for on-chain confirmation and read
+      // balance at the confirmed blockNumber via public RPC. Skipping confirmation
+      // when balance "already changed" is unreliable with parallel payments —
+      // the apparent change may have come from a different in-flight payment.
+      if (txHash) {
         setWallet((w) => ({ ...w, balanceUpdating: true }));
-        
-        // Use transaction receipt waiting (more reliable) with balance polling as fallback
-        const didChange = await waitForTxAndRefreshBalance(
+        await waitForTxAndRefreshBalance(
           currentAddress,
           balanceBeforePayment,
           txHash,
           paymentStartBlock,
           (b) => setWallet((w) => ({ ...w, usdcBalance: b })),
         );
-        
-        // Mark polling complete
         setWallet((w) => ({ ...w, balanceUpdating: false }));
-        
-        // If balance still hasn't changed after waiting, log it
+      } else if (!balanceChanged(newBalance, balanceBeforePayment)) {
+        // No txHash — poll for on-chain transfer event as confirmation signal
+        console.log(`[x402] ⏳ No txHash and balance unchanged. Polling for on-chain confirmation...`);
+        setWallet((w) => ({ ...w, balanceUpdating: true }));
+        const didChange = await waitForTxAndRefreshBalance(
+          currentAddress,
+          balanceBeforePayment,
+          undefined,
+          paymentStartBlock,
+          (b) => setWallet((w) => ({ ...w, usdcBalance: b })),
+        );
+        setWallet((w) => ({ ...w, balanceUpdating: false }));
         if (!didChange) {
           console.log(
-            "[x402] ❌ Balance update timed out. Transaction may still be processing on-chain. " +
-            "Refresh the page or check the transaction on BaseScan to verify." +
-            (txHash ? ` TX: https://sepolia.basescan.org/tx/${txHash}` : "")
+            "[x402] ❌ Balance update timed out — facilitator may not have settled yet. " +
+            "Check BaseScan for your address or refresh the page."
           );
         }
       } else {
@@ -884,6 +913,41 @@ export default function App() {
         </div>
         {wallet.error && <p style={styles.errorBanner}>{wallet.error}</p>}
       </header>
+
+      {/* Receiver Config Panel */}
+      <div style={styles.receiverPanel}>
+        <div style={styles.receiverInner}>
+          <span style={styles.receiverLabel}>💸 Payment Receiver</span>
+          <div style={styles.receiverRow}>
+            <input
+              style={styles.receiverInput}
+              type="text"
+              placeholder="0x… receiver wallet address"
+              value={receiverInput}
+              onChange={(e) => { setReceiverInput(e.target.value); setReceiverError(""); }}
+              spellCheck={false}
+            />
+            <input
+              style={{ ...styles.receiverInput, width: 140, marginLeft: 8 }}
+              type="password"
+              placeholder="Admin secret"
+              value={receiverSecret}
+              onChange={(e) => { setReceiverSecret(e.target.value); setReceiverError(""); }}
+            />
+            <button
+              style={{ ...styles.btn, ...(receiverSaving ? styles.btnDisabled : styles.btnSave) }}
+              onClick={saveReceiver}
+              disabled={receiverSaving}
+            >
+              {receiverSaving ? "Saving…" : "Save"}
+            </button>
+          </div>
+          {receiverError && <p style={styles.receiverError}>{receiverError}</p>}
+          {receiverSaved && !receiverError && (
+            <p style={styles.receiverSaved}>✅ Receiver: {receiverSaved.slice(0, 10)}…{receiverSaved.slice(-6)}</p>
+          )}
+        </div>
+      </div>
 
       {/* Cards */}
       <main style={styles.main}>
@@ -1247,4 +1311,57 @@ const styles: Record<string, React.CSSProperties> = {
     borderTop: "1px solid rgba(255,255,255,0.06)",
   },
   link: { color: "#818cf8" },
+  receiverPanel: {
+    background: "rgba(0,0,0,0.25)",
+    borderBottom: "1px solid rgba(255,255,255,0.07)",
+    padding: "12px 32px",
+  },
+  receiverInner: {
+    maxWidth: 960,
+    margin: "0 auto",
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 6,
+  },
+  receiverLabel: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: "#94a3b8",
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.06em",
+  },
+  receiverRow: {
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
+    flexWrap: "wrap" as const,
+  },
+  receiverInput: {
+    flex: 1,
+    minWidth: 260,
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    borderRadius: 8,
+    padding: "8px 12px",
+    fontSize: 13,
+    fontFamily: "monospace",
+    color: "#e2e8f0",
+    outline: "none",
+  },
+  btnSave: {
+    background: "rgba(99,102,241,0.7)",
+    color: "#fff",
+    padding: "8px 16px",
+    fontSize: 13,
+  },
+  receiverError: {
+    margin: 0,
+    fontSize: 12,
+    color: "#fca5a5",
+  },
+  receiverSaved: {
+    margin: 0,
+    fontSize: 12,
+    color: "#86efac",
+  },
 };

@@ -28,6 +28,10 @@ export default defineConfig(({ mode }) => {
           target: serverUrl,
           changeOrigin: true,
         },
+        "/config": {
+          target: serverUrl,
+          changeOrigin: true,
+        },
       },
     },
   };

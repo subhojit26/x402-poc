@@ -45,8 +45,8 @@ app.use((req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // The address that will RECEIVE payments (your wallet address on Base Sepolia)
-// Replace with your own testnet wallet address, or keep this for demo purposes
-const PAYMENT_RECEIVER =
+// Can be updated at runtime via POST /config/receiver
+let PAYMENT_RECEIVER: string =
   process.env.PAYMENT_RECEIVER ||
   "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
 
@@ -80,63 +80,69 @@ const resourceServer = new x402ResourceServer(facilitatorClients).register(
 // Payment Middleware — single call protects ALL configured routes
 // ─────────────────────────────────────────────────────────────────────────────
 
-const premiumRoutes = {
-  "GET /premium/weather": {
+// NOTE: Route keys must NOT include the "/premium" mount prefix.
+// Express strips the mount path from req.path when app.use("/premium", fn) is
+// called, so the middleware sees "/weather" not "/premium/weather".
+function buildPremiumRoutes(receiver: string) {
+  return {
+  "GET /weather": {
     accepts: {
       scheme: "exact",
       price: "$0.001", // $0.001 USDC per request (~fraction of a cent)
       network: NETWORK,
-      payTo: PAYMENT_RECEIVER,
+      payTo: receiver,
       maxTimeoutSeconds: 60,
     },
     description: "Real-time weather data (testnet demo)",
     mimeType: "application/json",
   },
-  "GET /premium/news": {
+  "GET /news": {
     accepts: {
       scheme: "exact",
       price: "$0.001",
       network: NETWORK,
-      payTo: PAYMENT_RECEIVER,
+      payTo: receiver,
       maxTimeoutSeconds: 60,
     },
     description: "Latest news headlines (testnet demo)",
     mimeType: "application/json",
   },
-  "GET /premium/stock/:symbol": {
+  // x402 route regex uses * as wildcard; Express :param syntax is NOT supported.
+  "GET /stock/*": {
     accepts: {
       scheme: "exact",
       price: "$0.002", // More expensive — more valuable data
       network: NETWORK,
-      payTo: PAYMENT_RECEIVER,
+      payTo: receiver,
       maxTimeoutSeconds: 60,
     },
     description: "Stock quote data (testnet demo)",
     mimeType: "application/json",
   },
-  "GET /premium/music": {
+  "GET /music": {
     accepts: {
       scheme: "exact",
       price: "$0.003", // Music content - higher value
       network: NETWORK,
-      payTo: PAYMENT_RECEIVER,
+      payTo: receiver,
       maxTimeoutSeconds: 60,
     },
     description: "Premium music track purchase (testnet demo)",
     mimeType: "application/json",
   },
-  "GET /premium/video": {
+  "GET /video": {
     accepts: {
       scheme: "exact",
       price: "$0.005", // Video content - highest value
       network: NETWORK,
-      payTo: PAYMENT_RECEIVER,
+      payTo: receiver,
       maxTimeoutSeconds: 60,
     },
     description: "Premium video content purchase (testnet demo)",
     mimeType: "application/json",
   },
-} satisfies Parameters<typeof paymentMiddleware>[0];
+  } satisfies Parameters<typeof paymentMiddleware>[0];
+}
 
 let paymentMiddlewareInitialized = false;
 let premiumPaymentMiddleware: RequestHandler | undefined;
@@ -148,7 +154,7 @@ let premiumPaymentMiddleware: RequestHandler | undefined;
 export const middlewareReady: Promise<boolean> = (async () => {
   try {
     await resourceServer.initialize();
-    premiumPaymentMiddleware = paymentMiddleware(premiumRoutes, resourceServer);
+    premiumPaymentMiddleware = paymentMiddleware(buildPremiumRoutes(PAYMENT_RECEIVER), resourceServer);
     paymentMiddlewareInitialized = true;
     return true;
   } catch (error) {
@@ -168,39 +174,53 @@ export const middlewareReady: Promise<boolean> = (async () => {
 // receipt (txHash, payer, etc.). However, cross-origin requests through proxies
 // and CDNs (Vercel, Railway) may strip custom response headers even when
 // Access-Control-Expose-Headers is configured. As a robust fallback, this
-// middleware intercepts res.end() *before* the x402 middleware wraps it. When
-// x402 replays the buffered response after settlement, our wrapper injects the
-// settlement receipt into the JSON body so the client can always access it.
+// middleware intercepts res.setHeader() to capture the receipt the instant x402
+// sets it, then intercepts res.end() to inject it into the JSON body so the
+// client can always access the receipt even when headers are stripped.
 app.use("/premium", (_req, res, next) => {
-  const originalEnd = res.end.bind(res) as typeof res.end;
+  let capturedReceipt: string | null = null;
   let injected = false;
 
-  (res as { end: typeof res.end }).end = function (
+  // Capture the receipt value the moment x402 sets PAYMENT-RESPONSE.
+  // This is more reliable than calling res.getHeader() during res.end() replay,
+  // because by that point headers may already be marked as sent.
+  const origSetHeader = res.setHeader.bind(res);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (res as any).setHeader = function (name: string, value: unknown) {
+    if (typeof name === "string" && name.toLowerCase() === "payment-response" && !capturedReceipt) {
+      capturedReceipt = String(value);
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ...endArgs: any[]
-  ) {
-    const paymentHeader =
-      res.getHeader("PAYMENT-RESPONSE") ??
-      res.getHeader("X-PAYMENT-RESPONSE");
+    return origSetHeader(name as any, value as any);
+  };
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const originalEnd = res.end.bind(res) as (...args: any[]) => any;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (res as any).end = function (...endArgs: any[]) {
     const chunk = endArgs[0] as unknown;
-    if (!injected && paymentHeader && res.statusCode < 400 && chunk && !res.headersSent) {
+    if (!injected && capturedReceipt && res.statusCode < 400 && chunk) {
       injected = true;
       try {
-        const bodyStr =
-          typeof chunk === "string" ? chunk : (chunk as Buffer).toString();
-        const json = JSON.parse(bodyStr) as Record<string, unknown>;
-        json._paymentReceipt = String(paymentHeader);
-        const newBody = JSON.stringify(json);
-        res.setHeader("Content-Length", Buffer.byteLength(newBody));
-        endArgs[0] = newBody;
+        const bodyStr = Buffer.isBuffer(chunk)
+          ? chunk.toString("utf8")
+          : typeof chunk === "string"
+          ? chunk
+          : null;
+        if (bodyStr) {
+          const json = JSON.parse(bodyStr) as Record<string, unknown>;
+          json._paymentReceipt = capturedReceipt;
+          const newBody = Buffer.from(JSON.stringify(json), "utf8");
+          try { origSetHeader("Content-Length", newBody.length); } catch { /* headers already sent */ }
+          endArgs[0] = newBody;
+        }
       } catch {
         // Not valid JSON — send as-is
       }
     }
-
     return originalEnd(...endArgs);
-  } as typeof res.end;
+  };
 
   next();
 });
@@ -328,6 +348,36 @@ app.get("/premium/video", (_req: Request, res: Response) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Config Endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Update the payment receiver address at runtime (no restart needed)
+app.post("/config/receiver", async (req: Request, res: Response) => {
+  const ADMIN_SECRET = process.env.ADMIN_SECRET;
+  const { address, secret } = req.body as { address?: string; secret?: string };
+
+  // If ADMIN_SECRET is configured, require it to prevent unauthorised receiver changes
+  if (ADMIN_SECRET) {
+    if (!secret || secret !== ADMIN_SECRET) {
+      return res.status(401).json({ success: false, error: "Unauthorised: invalid admin secret" });
+    }
+  }
+
+  if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    return res.status(400).json({ success: false, error: "Invalid EVM address" });
+  }
+  PAYMENT_RECEIVER = address;
+  try {
+    premiumPaymentMiddleware = paymentMiddleware(buildPremiumRoutes(PAYMENT_RECEIVER), resourceServer);
+    paymentMiddlewareInitialized = true;
+    console.log(`[x402] Payment receiver updated to: ${PAYMENT_RECEIVER}`);
+    return res.json({ success: true, receiver: PAYMENT_RECEIVER });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Free Endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -340,6 +390,7 @@ app.get("/health", (_req: Request, res: Response) => {
     facilitator: "https://x402.org/facilitator",
     premiumRoutesEnabled: paymentMiddlewareInitialized,
     payTo: PAYMENT_RECEIVER,
+    receiverAddress: PAYMENT_RECEIVER,
     routes: {
       "GET /premium/weather": "$0.001 USDC",
       "GET /premium/news": "$0.001 USDC",
